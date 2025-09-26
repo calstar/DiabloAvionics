@@ -24,7 +24,7 @@ import serial, serial.tools.list_ports
 pg.setConfigOptions(antialias=False)
 
 # ---------------------- Protocol and constants ----------------------
-PACK_FMT = "<IBifIf"
+PACK_FMT = "<IBifIfI"
 PACK_SIZE = struct.calcsize(PACK_FMT)
 
 BAUD = 115200
@@ -54,7 +54,7 @@ CHANNEL_COLORS = [
 # ---------------------- Helpers ----------------------
 
 def plausible(rec):
-    t_us, ch, raw, volts, read_us, sps = rec
+    t_us, ch, raw, volts, read_us, sps, sent_us = rec
     if not (0 <= ch < NUM_CHANNELS_MAX):
         return False
     if not (RAW_MIN <= raw <= RAW_MAX):
@@ -64,6 +64,8 @@ def plausible(rec):
     if not (1 <= read_us <= 2_000_000):
         return False
     if not (0.0 <= sps <= 2_000_000.0):
+        return False
+    if not (0 <= sent_us <= 0xFFFFFFFF):
         return False
     return True
 
@@ -294,6 +296,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
     def _on_change(self, val):
         self.parent.window_seconds = float(val)
+        self.parent._prune_all()
         self.lbl.setText(f"{float(val):.1f}s")
 
     def _on_change_maxv(self, val):
@@ -412,6 +415,8 @@ class App(QtWidgets.QMainWindow):
         self.plot.setClipToView(True)
         self.plot.setDownsampling(mode='peak')
         self.plot.setMouseEnabled(x=True, y=True)
+        self.legend = self.plot.addLegend(labelTextSize="9pt")
+        
 
         main.addWidget(self.plot, 1)
 
@@ -439,8 +444,10 @@ class App(QtWidgets.QMainWindow):
         form = QtWidgets.QVBoxLayout(box)
         self.lbl_read_mean = QtWidgets.QLabel("read_us mean: n/a")
         self.lbl_sps_mean = QtWidgets.QLabel("sps mean: n/a")
+        self.lbl_latency = QtWidgets.QLabel("latency jitter mean/max: n/a")
         form.addWidget(self.lbl_read_mean)
         form.addWidget(self.lbl_sps_mean)
+        form.addWidget(self.lbl_latency)
         form.addWidget(self._hline())
         form.addWidget(QtWidgets.QLabel(f"Per-channel mean V (last {int(VOLT_MEAN_WINDOW_S*1000)} ms)"))
         self.per_ch = {}
@@ -453,10 +460,14 @@ class App(QtWidgets.QMainWindow):
 
         # Data storage
         self.t0 = None
+        self.send_start_raw = None
+        self.send_prev_raw = None
+        self.send_rollover = 0
         self.t = defaultdict(deque)  # per-ch time
         self.v = defaultdict(deque)  # per-ch volts
         self.reads = deque(maxlen=MAX_POINTS)  # (t_rel, read_us)
         self.sps = deque(maxlen=MAX_POINTS)    # (t_rel, sps)
+        self.latencies = deque(maxlen=MAX_POINTS)  # (t_rel, latency_s)
 
         # Timer for plot updates
         self.timer = QtCore.QTimer(self)
@@ -472,6 +483,29 @@ class App(QtWidgets.QMainWindow):
         line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
         line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
         return line
+
+    def _prune_all(self):
+        if not self.t:
+            return
+        latest = 0.0
+        for ts in self.t.values():
+            if ts:
+                latest = max(latest, ts[-1])
+        cutoff = latest - self.window_seconds
+        if cutoff <= 0.0:
+            return
+        for ch in list(self.t.keys()):
+            ts = self.t[ch]
+            vs = self.v[ch]
+            while ts and ts[0] < cutoff:
+                ts.popleft()
+                vs.popleft()
+        while self.reads and self.reads[0][0] < cutoff:
+            self.reads.popleft()
+        while self.sps and self.sps[0][0] < cutoff:
+            self.sps.popleft()
+        while self.latencies and self.latencies[0][0] < cutoff:
+            self.latencies.popleft()
 
     def _refresh_port_list(self):
         ports = list_ports()
@@ -502,10 +536,14 @@ class App(QtWidgets.QMainWindow):
 
     def _connect(self, port, baud):
         self.t0 = None
+        self.send_start_raw = None
+        self.send_prev_raw = None
+        self.send_rollover = 0
         self.t.clear()
         self.v.clear()
         self.reads.clear()
         self.sps.clear()
+        self.latencies.clear()
 
         self.reader = Reader(port, baud)
         self.reader.sample.connect(self._on_sample)
@@ -516,7 +554,7 @@ class App(QtWidgets.QMainWindow):
     # --------- Data ingestion ---------
     @QtCore.pyqtSlot(float, object)
     def _on_sample(self, t_wall, rec):
-        t_us, ch, raw, volts, read_us, sps = rec
+        t_us, ch, raw, volts, read_us, sps, sent_us = rec
         if self.t0 is None:
             self.t0 = t_wall
         t_rel = t_wall - self.t0
@@ -526,6 +564,33 @@ class App(QtWidgets.QMainWindow):
         self.v[ch].append(volts)
         self.reads.append((t_rel, read_us))
         self.sps.append((t_rel, sps))
+
+        send_raw = int(sent_us) & 0xFFFFFFFF
+        if self.send_start_raw is None:
+            self.send_start_raw = send_raw
+            self.send_prev_raw = send_raw
+            self.send_rollover = 0
+        else:
+            if self.send_prev_raw is not None and send_raw < self.send_prev_raw:
+                self.send_rollover += 1
+            self.send_prev_raw = send_raw
+        send_elapsed = ((self.send_rollover << 32) + send_raw - self.send_start_raw) / 1_000_000.0
+        diff = t_rel - send_elapsed
+        self.latencies.append((t_rel, diff))
+
+        cutoff = t_rel - self.window_seconds
+        if cutoff > 0.0:
+            ts = self.t[ch]
+            vs = self.v[ch]
+            while ts and ts[0] < cutoff:
+                ts.popleft()
+                vs.popleft()
+            while self.reads and self.reads[0][0] < cutoff:
+                self.reads.popleft()
+            while self.sps and self.sps[0][0] < cutoff:
+                self.sps.popleft()
+            while self.latencies and self.latencies[0][0] < cutoff:
+                self.latencies.popleft()
 
         # Feed metrics window too
         if self.metrics_win is not None:
@@ -584,6 +649,8 @@ class App(QtWidgets.QMainWindow):
             self.reads.popleft()
         while self.sps and self.sps[0][0] < now - keep:
             self.sps.popleft()
+        while self.latencies and self.latencies[0][0] < now - keep:
+            self.latencies.popleft()
 
         # Y limits
         if self.autoscale:
@@ -611,12 +678,23 @@ class App(QtWidgets.QMainWindow):
         # Overall means over last window
         recent_reads = [val for t, val in self.reads if t >= now - self.window_seconds]
         recent_sps = [val for t, val in self.sps if t >= now - self.window_seconds]
+        recent_latency_diffs = [val for t, val in self.latencies if t >= now - self.window_seconds]
         if recent_reads:
             mean_read = sum(recent_reads) / len(recent_reads)
             self.lbl_read_mean.setText(f"read_us mean (last {self.window_seconds:.0f}s): {mean_read:.2f}")
         if recent_sps:
             mean_sps = sum(recent_sps) / len(recent_sps)
             self.lbl_sps_mean.setText(f"sps mean (last {self.window_seconds:.0f}s): {mean_sps:.2f}")
+        if recent_latency_diffs:
+            baseline = min(recent_latency_diffs)
+            latencies = [max(0.0, diff - baseline) for diff in recent_latency_diffs]
+            mean_latency = sum(latencies) / len(latencies)
+            max_latency = max(latencies)
+            self.lbl_latency.setText(
+                f"latency jitter mean/max (last {self.window_seconds:.0f}s): {mean_latency * 1000:.2f} ms / {max_latency * 1000:.2f} ms"
+            )
+        else:
+            self.lbl_latency.setText("latency jitter mean/max: n/a")
 
         # Per-channel mean V over last 100 ms
         for ch in TOGGLE_CHANNELS:
@@ -675,7 +753,7 @@ class App(QtWidgets.QMainWindow):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     # Make PyQtGraph look nice
-    pg.setConfigOptions(antialias=True)
+    pg.setConfigOptions(antialias=False)
     w = App()
     w.show()
     try:
