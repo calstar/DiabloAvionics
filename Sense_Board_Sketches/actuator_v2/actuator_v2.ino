@@ -167,3 +167,7 @@ void loop() {
     Serial.println(level ? "OPEN" : "CLOSE");
   }
 }
+
+
+
+adc.read
