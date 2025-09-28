@@ -18,17 +18,10 @@
 
 // String state_names[] = { "Idle", "Armed", "Press","Press2", "Abort", "Fill", "Fire" };
 
-<<<<<<< HEAD
 ADS126X SENSE_1;
 ADS126X SENSE_2;
 
 
-=======
-// ADS126X SENSE_1;
-// ADS126X SENSE_2;
-// MCP23S17* PYRO_1_MCP;
-// MCP23S17* PYRO_2_MCP;
->>>>>>> b5ea93b4b8366abfc161a76ded963847e60f89ea
 
 // struct Pressures {
 //   float P_pressurant; // pressurant tank

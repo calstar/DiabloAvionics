@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 #include <MCP23S17.h>
 #include <ADS126X.h>
 #include <SPI.h>
@@ -27,33 +26,6 @@
 
 // #define SOL_PVF 39 //actuators
 // #define SOL_PVO 40 //actuators
-=======
-// #include <MCP23S17.h>
-// #include <ADS126X.h>
-// #include <SPI.h>
-// #include <state_machine.h>
-
-// #define SENSE_CS_1 40
-// #define SENSE_DRDY_1 4 
-// #define SENSE_CS_2 42
-// #define SENSE_DRDY_2 35
-// #define PYRO_CS_1 16
-// #define PYRO_CS_2 4
-// #define MOSI 5
-// #define MISO 41
-// #define CLK 13
-
-// #define VALVE_FUP 36 // Fuel upstream solenoid open
-// #define VALVE_FDP 35 // Fuel downstream solenoid open
-// #define VALVE_OUP 34 // LOX upstream solenoid open
-// #define VALVE_ODP 33 // LOX downstream solenoid open
-// #define FUELVENT 37 //SOL FVP
-// #define LOXVENT 38 //SOL OVP
-// #define PRESSURELINE 32
-
-// #define FUELMAIN 39 //actuators
-// #define LOXMAIN 40 //actuators
->>>>>>> b5ea93b4b8366abfc161a76ded963847e60f89ea
 
 // #define UP_PRESSURE 10
 
@@ -84,7 +56,6 @@
 //   return voltage;
 // }
 
-<<<<<<< HEAD
 
 
 
@@ -133,17 +104,10 @@ void setup() {
 void loop() {
   // No Serial parser. Call your control functions from here or other tasks.
   // Example:
-  openSolenoid(SOL_OUP);
+  openSolenoid(OUP);
   delay(1000);
-  closeSolenoid(SOL_OUP);
+  closeSolenoid(OUP);
   delay(1000);
   
 }
 
-=======
-// void mosfetCloseAllValves() {
-//     for (int i = 0; i < 9; i++) {
-//       PYRO_1_MCP->write1(i, 0);
-//     }
-// }
->>>>>>> b5ea93b4b8366abfc161a76ded963847e60f89ea
