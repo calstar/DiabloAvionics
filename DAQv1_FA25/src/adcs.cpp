@@ -60,8 +60,11 @@ bool configure(uint8_t negativeReference,
         ads.setFilter(sincFilter);
     } 
     ads.setRate(rate);
-    ads.setPulseMode();
+    // ads.setPulseMode(); cts
+    ads.setContinuousMode();
     ads.calibrateSelfOffsetADC1();
+    delay(50);
+    ads.startADC1();
 
     return true;
 }
@@ -81,25 +84,30 @@ ReadResult read(uint8_t channel) {
     uint32_t read_start = micros();
     adcs::setChannel(channel);
     uint32_t conv_start = micros();
-    ads.startADC1();
+    
 
     // Data Ready
-    uint32_t t_wait = millis();
-    while (digitalRead(DRDY_PIN) == HIGH) {
-        if (millis() - t_wait > 100) {       // 100 ms timeout guard
-        return {INT32_MIN, 0u, 0u, false};
+    uint32_t t_wait = micros();
+    for (int i = 0; i < 5; ++i) {
+        while (digitalRead(DRDY) == HIGH) {
+            if (micros() - t_wait > 100000) { // 100 ms timeout guard
+                return {INT32_MIN, 0u, 0u, 0u, false};
+            }
         }
+    // short pause so we sample again to confirm DRDY stayed low
+    // delayMicroseconds(2);
     }
-    uint32_t conv_time = micros() - conv_start;
+    uint32_t conv_time_dur = micros() - conv_start;
     
     
     long raw = ads.readADC1(channel, neg_pin);
     
 
 
-    uint32_t read_time = micros() - read_start;
+    uint32_t read_time_dur = micros() - read_start;
+    uint32_t sample_time = t_wait + (conv_time_dur >> 1);
 
-    return ReadResult{raw, read_time, conv_time, true};
+    return ReadResult{raw, sample_time, read_time_dur, conv_time_dur, true};
 }
 
 AllResults readAll(const uint8_t* channels, size_t num_channels) {

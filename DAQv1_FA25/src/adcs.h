@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+namespace adcs {
+
 // Sentinels for “skip this setting”
 static constexpr uint8_t REF_SKIP   = 0xFF;
 static constexpr uint8_t FILT_SKIP  = 0xFF;
@@ -17,8 +19,9 @@ static constexpr uint8_t FILT_SKIP  = 0xFF;
 // ADC Read Struct
   struct ReadResult {
     int32_t  raw;       // signed ADC code
-    uint32_t read_time;   // SPI read time in us. Total time of adc::read()
-    uint32_t conv_time;   // Conversion time. Time from startADC to DRDY
+    uint32_t sample_time; //Sample read abs time
+    uint32_t read_time_dur;   // SPI read time in us. Total time of adc::read()
+    uint32_t conv_time_dur;   // Conversion time. Time from startADC to DRDY
     bool     ok;        // true if DRDY arrived
   };
 
@@ -36,7 +39,7 @@ static constexpr uint8_t FILT_SKIP  = 0xFF;
     uint32_t    failures;               // number of channels where ok == false
   };
 
-namespace adcs {
+
 
 // Call once at startup. Sets up SPI, pins, resets the ADC, waits for DRDY.
 // Returns true if the ADC responds. Initializes the ADS1263.
