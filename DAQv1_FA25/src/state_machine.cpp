@@ -27,34 +27,34 @@
 // #define SOL_PVF 39 //actuators
 // #define SOL_PVO 40 //actuators
 
-// #define UP_PRESSURE 10
+#define UP_PRESSURE 10
 
-// // Pressure transducers
-// // Fuel path
-// #define PT_I 13  // INJECTOR
-// #define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
+// Pressure transducers
+// Fuel path
+#define PT_I 13  // INJECTOR
+#define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
 
-// #define PT_O1 9   // OX TANK PRESSURE 
-// #define PT_F1 6 // FUEL TANK PRESSURE
+#define PT_O1 9   // OX TANK PRESSURE 
+#define PT_F1 6 // FUEL TANK PRESSURE
 
-// // LOX path - new pins need to be defined
-// #define PT_O2 10   // LOX DOWNSTREAM pressure
-// #define PT_F2 12 // FUEL DOWNSTREAM pressure
+// LOX path - new pins need to be defined
+#define PT_O2 10   // LOX DOWNSTREAM pressure
+#define PT_F2 12 // FUEL DOWNSTREAM pressure
 
-// float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
-//     return (PT_A * pow(raw_value, 3)) +
-//            (PT_B * pow(raw_value, 2)) +
-//            (PT_C * raw_value) + PT_D;
-// }
+float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
+    return (PT_A * pow(raw_value, 3)) +
+           (PT_B * pow(raw_value, 2)) +
+           (PT_C * raw_value) + PT_D;
+}
 
-// float readPT(int channel) {
-//   delay(10);
-//   SENSE_1.readADC1(channel, ADS126X_AINCOM);
-//   delay(10);
-//   long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
-//   float voltage = (float)raw * 5.0 / 2147483648.0;
-//   return voltage;
-// }
+float readPT(int channel) {
+  delay(10);
+  SENSE_1.readADC1(channel, ADS126X_AINCOM);
+  delay(10);
+  long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
+  float voltage = (float)raw * 5.0 / 2147483648.0;
+  return voltage;
+}
 
 
 
@@ -104,9 +104,9 @@ void setup() {
 void loop() {
   // No Serial parser. Call your control functions from here or other tasks.
   // Example:
-  openSolenoid(OUP);
+  openSolenoid(SOL_OUP);
   delay(1000);
-  closeSolenoid(OUP);
+  closeSolenoid(SOL_OUP);
   delay(1000);
   
 }
