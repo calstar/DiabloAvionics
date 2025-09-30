@@ -1,69 +1,69 @@
-#include <MCP23S17.h>
-#include <ADS126X.h>
-#include <SPI.h>
-#include <state_machine.h>
-#include <solenoid_control.h>
-#include <Arduino.h>
+// #include <MCP23S17.h>
+// #include <ADS126X.h>
+// #include <SPI.h>
+// #include <state_machine.h>
+// #include <solenoid_control.h>
+// #include <Arduino.h>
 
-#define SENSE_CS_1 40
-#define SENSE_DRDY_1 4 
-#define SENSE_CS_2 42
-#define SENSE_DRDY_2 35
-#define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
-#define PYRO_CS_1 48
-#define PYRO_CS_2 48
-#define MOSI 5
-#define MISO 41
-#define CLK 13
+// #define SENSE_CS_1 40
+// #define SENSE_DRDY_1 4 
+// #define SENSE_CS_2 42
+// #define SENSE_DRDY_2 35
+// #define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
+// #define PYRO_CS_1 48
+// #define PYRO_CS_2 48
+// #define MOSI 5
+// #define MISO 41
+// #define CLK 13
 
-// #define SOL_FUP 36 // Fuel upstream solenoid open
-// #define SOL_FDP 35 // Fuel downstream solenoid open
-// #define SOL_OUP 34 // LOX upstream solenoid open
-// #define SOL_ODP 33 // LOX downstream solenoid open
-// #define SOL_FVP 37 //SOL FVP
-// #define SOL_OVP 38 //SOL OVP
-#define PRESSURELINE 32
+// // #define SOL_FUP 36 // Fuel upstream solenoid open
+// // #define SOL_FDP 35 // Fuel downstream solenoid open
+// // #define SOL_OUP 34 // LOX upstream solenoid open
+// // #define SOL_ODP 33 // LOX downstream solenoid open
+// // #define SOL_FVP 37 //SOL FVP
+// // #define SOL_OVP 38 //SOL OVP
+// #define PRESSURELINE 32
 
-// #define SOL_PVF 39 //actuators
-// #define SOL_PVO 40 //actuators
+// // #define SOL_PVF 39 //actuators
+// // #define SOL_PVO 40 //actuators
 
-#define UP_PRESSURE 10
+// #define UP_PRESSURE 10
 
-// Pressure transducers
-// Fuel path
-#define PT_I 13  // INJECTOR
-#define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
+// // Pressure transducers
+// // Fuel path
+// #define PT_I 13  // INJECTOR
+// #define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
 
-#define PT_O1 9   // OX TANK PRESSURE 
-#define PT_F1 6 // FUEL TANK PRESSURE
+// #define PT_O1 9   // OX TANK PRESSURE 
+// #define PT_F1 6 // FUEL TANK PRESSURE
 
-// LOX path - new pins need to be defined
-#define PT_O2 10   // LOX DOWNSTREAM pressure
-#define PT_F2 12 // FUEL DOWNSTREAM pressure
+// // LOX path - new pins need to be defined
+// #define PT_O2 10   // LOX DOWNSTREAM pressure
+// #define PT_F2 12 // FUEL DOWNSTREAM pressure
 
-float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
-    return (PT_A * pow(raw_value, 3)) +
-           (PT_B * pow(raw_value, 2)) +
-           (PT_C * raw_value) + PT_D;
-}
+// float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
+//     return (PT_A * pow(raw_value, 3)) +
+//            (PT_B * pow(raw_value, 2)) +
+//            (PT_C * raw_value) + PT_D;
+// }
 
-float readPT(int channel) {
-  delay(10);
-  SENSE_1.readADC1(channel, ADS126X_AINCOM);
-  delay(10);
-  long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
-  float voltage = (float)raw * 5.0 / 2147483648.0;
-  return voltage;
-}
-
-
+// float readPT(int channel) {
+//   delay(10);
+//   SENSE_1.readADC1(channel, ADS126X_AINCOM);
+//   delay(10);
+//   long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
+//   float voltage = (float)raw * 5.0 / 2147483648.0;
+//   return voltage;
+// }
 
 
-void setup() {
-  Serial.begin(115200);
-  static SPIClass& bus = SPI;
-  solenoidsInit(bus, /*SCLK=*/13, /*MISO=*/41, /*MOSI=*/5, /*CS=*/48, /*addr=*/0x00);
-  SPI.begin(CLK, MISO, MOSI, -1);
+
+
+// void setup() {
+//   Serial.begin(115200);
+//   static SPIClass& bus = SPI;
+//   solenoidsInit(bus, /*SCLK=*/13, /*MISO=*/41, /*MOSI=*/5, /*CS=*/48, /*addr=*/0x00);
+//   SPI.begin(CLK, MISO, MOSI, -1);
   
 
 //   PYRO_1_MCP = new MCP23S17(PYRO_CS_1, 0x00, &SPI);
@@ -99,15 +99,15 @@ void setup() {
 //   P_threshold_lox_current = P_threshold_lox_base;
 //   P_threshold_lox_down = P_threshold_lox_base;
 
-}
+// }
 
-void loop() {
-  // No Serial parser. Call your control functions from here or other tasks.
-  // Example:
-  openSolenoid(SOL_OUP);
-  delay(1000);
-  closeSolenoid(SOL_OUP);
-  delay(1000);
+// void loop() {
+//   // No Serial parser. Call your control functions from here or other tasks.
+//   // Example:
+//   openSolenoid(SOL_OUP);
+//   delay(1000);
+//   closeSolenoid(SOL_OUP);
+//   delay(1000);
   
-}
+// }
 
