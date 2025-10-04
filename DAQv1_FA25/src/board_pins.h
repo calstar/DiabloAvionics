@@ -24,7 +24,7 @@ inline float   vRef    = 2.5f;
 inline float   adcScale = 2147483648.0f;     // 2^31, signed full-scale
 
 // ---------- Channels ----------
-inline uint8_t channels[] = {0, 1, 2, 3, 4, 5,6 ,7,8,9};
+inline uint8_t channels[] = {2, 3};
 inline size_t  num_channels = sizeof(channels) / sizeof(channels[0]);
 
 /*
