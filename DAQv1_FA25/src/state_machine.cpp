@@ -1,20 +1,19 @@
-// #include <MCP23S17.h>
-// #include <ADS126X.h>
-// #include <SPI.h>
-// #include <state_machine.h>
-// #include <solenoid_control.h>
-// #include <Arduino.h>
+#include <MCP23S17.h>
+#include <ADS126X.h>
+#include <SPI.h>
+#include <state_machine.h>
+#include <solenoid_control.h>
+#include <Arduino.h>
+#include <board_pins.h>
 
-// #define SENSE_CS_1 40
-// #define SENSE_DRDY_1 4 
-// #define SENSE_CS_2 42
-// #define SENSE_DRDY_2 35
-// #define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
-// #define PYRO_CS_1 48
-// #define PYRO_CS_2 48
-// #define MOSI 5
-// #define MISO 41
-// #define CLK 13
+#define SENSE_CS_1 40
+#define SENSE_DRDY_1 4 
+#define SENSE_CS_2 42
+#define SENSE_DRDY_2 35
+#define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
+#define PYRO_CS_1 48
+#define PYRO_CS_2 48
+
 
 // // #define SOL_FUP 36 // Fuel upstream solenoid open
 // // #define SOL_FDP 35 // Fuel downstream solenoid open
@@ -29,17 +28,6 @@
 
 // #define UP_PRESSURE 10
 
-// // Pressure transducers
-// // Fuel path
-// #define PT_I 13  // INJECTOR
-// #define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
-
-// #define PT_O1 9   // OX TANK PRESSURE 
-// #define PT_F1 6 // FUEL TANK PRESSURE
-
-// // LOX path - new pins need to be defined
-// #define PT_O2 10   // LOX DOWNSTREAM pressure
-// #define PT_F2 12 // FUEL DOWNSTREAM pressure
 
 // float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
 //     return (PT_A * pow(raw_value, 3)) +
@@ -55,9 +43,6 @@
 //   float voltage = (float)raw * 5.0 / 2147483648.0;
 //   return voltage;
 // }
-
-
-
 
 // void setup() {
 //   Serial.begin(115200);
@@ -101,13 +86,13 @@
 
 // }
 
-// void loop() {
-//   // No Serial parser. Call your control functions from here or other tasks.
-//   // Example:
-//   openSolenoid(SOL_OUP);
-//   delay(1000);
-//   closeSolenoid(SOL_OUP);
-//   delay(1000);
+void loop() {
+  // No Serial parser. Call your control functions from here or other tasks.
+  // Example:
+  openSolenoid(OUP);
+  delay(1000);
+  closeSolenoid(OUP);
+  delay(1000);
   
 // }
 

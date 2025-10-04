@@ -1,7 +1,7 @@
-
 #include <MCP23S17.h>
 #include <ADS126X.h>
 #include <SPI.h>
+//#include <solenoid_control.h>
 
 
 enum STATES { 
