@@ -174,7 +174,6 @@ void ventKeroLOX() {
     openSolenoid(FVP);
     openSolenoid(OVP);
     //once pressure in both tanks = 0 psi
-    closeAllvalves();
 }
 
 void openMains() {
@@ -184,8 +183,40 @@ void openMains() {
 }
 
 void ventTanks() {
-    ventKeroLOX();
+    //while KeroLox pressure > 0
+      ventKeroLOX();
+      delay(25);
+    //
+    closeAllvalves();
 }
+
+void ventAll() {
+    ventKeroLOX();
+  //while Pressurant pressure > 0
+    pressKeroLOX();
+      // while KeroLox pressure > 0
+         ventKeroLOX();
+         delay(25);
+      //
+      closeAllvalves();
+    closeAllvalves();
+}
+
+void Abort() {
+    ventKeroLOX();
+    //while Pressurant pressure > 0
+    pressKeroLOX();
+      // while KeroLox pressure > 0
+        //if Pressurant pressure == 0, kerolox pressure < 100,
+        //openMains();
+         ventKeroLOX();
+         delay(25);
+      //
+      closeAllvalves();
+    closeAllvalves();
+}
+
+
 
 // ===================== Arduino hooks =====================
 // If you truly don’t want Arduino’s setup/loop, you can remove these and

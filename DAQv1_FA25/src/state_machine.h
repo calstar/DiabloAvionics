@@ -2,6 +2,7 @@
 #include <MCP23S17.h>
 #include <ADS126X.h>
 #include <SPI.h>
+//#include <solenoid_control.h>
 
 
 enum STATES { 
@@ -178,3 +179,6 @@ float integral_error_lox_up = 0;
 // bool lox_downstream_solenoid_state = false;
 
 float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D);
+
+
+
