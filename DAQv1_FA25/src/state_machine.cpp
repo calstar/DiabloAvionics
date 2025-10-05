@@ -15,44 +15,40 @@
 #define PYRO_CS_2 48
 
 
-// #define SOL_FUP 36 // Fuel upstream solenoid open
-// #define SOL_FDP 35 // Fuel downstream solenoid open
-// #define SOL_OUP 34 // LOX upstream solenoid open
-// #define SOL_ODP 33 // LOX downstream solenoid open
-// #define SOL_FVP 37 //SOL FVP
-// #define SOL_OVP 38 //SOL OVP
-#define PRESSURELINE 32
+// // #define SOL_FUP 36 // Fuel upstream solenoid open
+// // #define SOL_FDP 35 // Fuel downstream solenoid open
+// // #define SOL_OUP 34 // LOX upstream solenoid open
+// // #define SOL_ODP 33 // LOX downstream solenoid open
+// // #define SOL_FVP 37 //SOL FVP
+// // #define SOL_OVP 38 //SOL OVP
+// #define PRESSURELINE 32
 
-// #define SOL_PVF 39 //actuators
-// #define SOL_PVO 40 //actuators
+// // #define SOL_PVF 39 //actuators
+// // #define SOL_PVO 40 //actuators
 
-#define UP_PRESSURE 10
-
-
-
-float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
-    return (PT_A * pow(raw_value, 3)) +
-           (PT_B * pow(raw_value, 2)) +
-           (PT_C * raw_value) + PT_D;
-}
-
-float readPT(int channel) {
-  delay(10);
-  SENSE_1.readADC1(channel, ADS126X_AINCOM);
-  delay(10);
-  long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
-  float voltage = (float)raw * 5.0 / 2147483648.0;
-  return voltage;
-}
+// #define UP_PRESSURE 10
 
 
+// float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
+//     return (PT_A * pow(raw_value, 3)) +
+//            (PT_B * pow(raw_value, 2)) +
+//            (PT_C * raw_value) + PT_D;
+// }
 
+// float readPT(int channel) {
+//   delay(10);
+//   SENSE_1.readADC1(channel, ADS126X_AINCOM);
+//   delay(10);
+//   long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
+//   float voltage = (float)raw * 5.0 / 2147483648.0;
+//   return voltage;
+// }
 
-void setup() {
-  Serial.begin(115200);
-  static SPIClass& bus = SPI;
-  solenoidsInit(bus, /*SCLK=*/13, /*MISO=*/41, /*MOSI=*/5, /*CS=*/48, /*addr=*/0x00);
-  SPI.begin(CLK, MISO, MOSI, -1);
+// void setup() {
+//   Serial.begin(115200);
+//   static SPIClass& bus = SPI;
+//   solenoidsInit(bus, /*SCLK=*/13, /*MISO=*/41, /*MOSI=*/5, /*CS=*/48, /*addr=*/0x00);
+//   SPI.begin(CLK, MISO, MOSI, -1);
   
 
 //   PYRO_1_MCP = new MCP23S17(PYRO_CS_1, 0x00, &SPI);
@@ -88,7 +84,7 @@ void setup() {
 //   P_threshold_lox_current = P_threshold_lox_base;
 //   P_threshold_lox_down = P_threshold_lox_base;
 
-}
+// }
 
 void loop() {
   // No Serial parser. Call your control functions from here or other tasks.
@@ -98,5 +94,5 @@ void loop() {
   closeSolenoid(OUP);
   delay(1000);
   
-}
+// }
 
