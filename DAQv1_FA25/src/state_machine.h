@@ -1,4 +1,3 @@
-
 #include <MCP23S17.h>
 #include <ADS126X.h>
 #include <SPI.h>
@@ -178,7 +177,11 @@ float integral_error_lox_up = 0;
 // bool lox_upstream_solenoid_state = false;
 // bool lox_downstream_solenoid_state = false;
 
+<<<<<<< HEAD
 float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D);
 
 
 
+=======
+float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D);
+>>>>>>> 35e20d6b928991615028829594922480c075078d

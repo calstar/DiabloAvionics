@@ -10,6 +10,10 @@
 // If your MCP23S17 library names these differently (e.g., pinMode / digitalWrite),
 // change the calls near the bottom accordingly.
 
+
+// begin(chs, )
+
+
 // ===================== GLOBALS =====================
 static MCP23S17* PYRO_1_MCP;
 static MCP23S17* PYRO_2_MCP;
@@ -221,4 +225,3 @@ void Abort() {
 // ===================== Arduino hooks =====================
 // If you truly don’t want Arduino’s setup/loop, you can remove these and
 // call solenoidsInit(...) from your own init code elsewhere.
-
