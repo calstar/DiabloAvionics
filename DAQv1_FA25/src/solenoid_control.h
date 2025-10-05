@@ -10,6 +10,10 @@
 // If your MCP23S17 library names these differently (e.g., pinMode / digitalWrite),
 // change the calls near the bottom accordingly.
 
+
+// begin(chs, )
+
+
 // ===================== GLOBALS =====================
 static MCP23S17* PYRO_1_MCP;
 static MCP23S17* PYRO_2_MCP;

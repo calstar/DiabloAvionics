@@ -27,6 +27,12 @@ inline float   adcScale = 2147483648.0f;     // 2^31, signed full-scale
 inline uint8_t channels[] = {2, 3};
 inline size_t  num_channels = sizeof(channels) / sizeof(channels[0]);
 
+// Channels for actuator
+// actuator1_channels[] = {(name, 1), (OUP, 2)}
+// actuator2_channels[]
+
+
+
 /*
 Old (Module 8) defines were duplicate/conflicting:
   #define DOUT 41 // MISO
