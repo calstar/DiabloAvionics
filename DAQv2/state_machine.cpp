@@ -53,41 +53,20 @@ class EngineState
 {
 public:
     virtual ~EngineState() = default;
-
-    // Called when entering the state
-    virtual void on_enter(SystemParameters &params) = 0;
-
-    // Called repeatedly while in the state
-    // Returns true if state should automatically transition to next state
-    virtual bool update(SystemParameters &params) = 0;
-
-    // Called when exiting the state
-    virtual void on_exit(SystemParameters &params) = 0;
-
-    // Get human-readable state name
-    virtual std::string get_name() const = 0;
-
-    // Define what conditions must be met to enter this state
-    // Each state checks the current SystemParameters and returns whether entry is valid
-    virtual bool validate_entry(const SystemParameters &params) const = 0;
-
-    // Define which states can be transitioned to FROM this state
-    // Return an empty vector if no manual transitions are allowed
-    virtual std::vector<std::string> get_allowed_transitions() const
+    virtual void on_enter(SystemParameters &params) = 0; // Called when entering the state
+    virtual bool update(SystemParameters &params) = 0; // Called repeatedly while in the state// Returns true if state should automatically transition to next state
+    virtual void on_exit(SystemParameters &params) = 0; // Called when exiting the state
+    virtual std::string get_name() const = 0; // Get human-readable state name
+    virtual bool validate_entry(const SystemParameters &params) const = 0; // Define what conditions must be met to enter this state// Each state checks the current SystemParameters and returns whether entry is valid
+    virtual std::vector<std::string> get_allowed_transitions() const // Return an empty vector if no manual transitions are allowed // Define which states can be transitioned to FROM this state
     {
         return {};
     }
-
-    // Returns the next state name for automatic transitions
-    // Empty string means no automatic transition to check
     virtual std::string get_next_state_name() const
     {
         return "";
     }
-
-    // If true, this state automatically checks transition requirements for get_next_state_name()
-    // and transitions as soon as they're met
-    virtual bool is_automatic() const
+    virtual bool is_automatic() const // If true, this state automatically checks transition requirements for get_next_state_name()
     {
         return false;
     }
@@ -102,29 +81,14 @@ class EngineFSM
 public:
     EngineFSM();
 
-    // Register a state (call this during initialization)
     void register_state(const std::string &state_name, std::shared_ptr<EngineState> state);
-
-    // Manual transition: checks if target state's validation criteria are met, then transitions
-    // Returns true if transition was successful
-    bool request_transition(const std::string &target_state, SystemParameters &params);
-
-    // Main update loop (call this periodically, passing current sensor data)
-    // Handles both manual update calls and automatic state transitions
+    bool request_transition(const std::string &target_state, SystemParameters &params); //manual transition
     void update(SystemParameters &params);
-
-    // Get current state
     std::string get_current_state() const;
-
-    // Get all states that can be transitioned to from the current state
-    // Includes only states whose validation criteria are currently met
-    std::vector<std::string> get_available_transitions(const SystemParameters &params) const;
+    std::vector<std::string> get_available_transitions(const SystemParameters &params) const; // Get all states that can be transitioned to from the current state// Includes only states whose validation criteria are currently met
 
 private:
-    // Helper to perform state transition
     void transition_to_state(const std::string &state_name, SystemParameters &params);
-
-    // Helper to check if a state's validation criteria are satisfied
     bool can_enter_state(const std::string &state_name, const SystemParameters &params) const;
 
     std::map<std::string, std::shared_ptr<EngineState>> states;
