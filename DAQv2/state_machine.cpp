@@ -212,7 +212,11 @@ bool EngineFSM::can_enter_state(const std::string &state_name,
     {
         return false;
     }
-
+    auto allowed = states.at(current_state)->get_allowed_transitions();
+    if (std::find(allowed.begin(), allowed.end(), state_name) == allowed.end())
+    {
+        return false; // Not an allowed transition from current state
+    }
     return states.at(state_name)->validate_entry(params);
 }
 
