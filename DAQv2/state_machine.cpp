@@ -12,17 +12,37 @@
 struct SystemParameters
 {
     // Pressures (psi)
-    float fuel_pressure = 0.0f;
-    float ox_pressure = 0.0f;
-    float gn2_pressure = 0.0f;
+    float PT_HP = 0.0f;
+    float PT_LP = 0.0f;
+    float PT_F = 0.0f;
+    float PT_O = 0.0f;
+
+    float RTD_O1 = 0.0f;
+    float RTD_O2 = 0.0f;
+    float RTD_O3 = 0.0f;
+
+    float PT_I = 0.0f;
+    float TC_I = 0.0f;
+    float PT_C1 = 0.0f;
+    float TC_C1 = 0.0f;
+    float TC_C3 = 0.0f;
+    float TC_C2 = 0.0f;
+    float PT_C2 = 0.0f;
+    float TC_C4 = 0.0f;
 
     // Solenoid states (true = open/energized, false = closed/de-energized)
-    bool solenoid = false;
+    bool SOL_PV = false;
+    bool SOL_FUP = false;
+    bool SOL_FV = false;
+    bool SOL_OUP = false;
+    bool SOL_OV = false;
+    bool SOL_FDP = false;
+    bool MOT_ODP = false;
+
+    bool ROT_MF = false;
+    bool ROT_MO = false;
 
     // Valve states (true = open, false = closed)
-    bool fuel_valve = false;
-    bool ox_valve = false;
-    bool vent_valve = false;
 };
 
 // ============================================================================
