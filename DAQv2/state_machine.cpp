@@ -17,9 +17,7 @@ struct SystemParameters
     float gn2_pressure = 0.0f;
 
     // Solenoid states (true = open/energized, false = closed/de-energized)
-    bool fuel_solenoid = false;
-    bool ox_solenoid = false;
-    bool gn2_solenoid = false;
+    bool solenoid = false;
 
     // Valve states (true = open, false = closed)
     bool fuel_valve = false;
