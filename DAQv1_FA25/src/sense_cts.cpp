@@ -146,7 +146,7 @@ void setup() {
   SPI.begin(SCLK, MISOp, MOSIp, CS);
 
   if (!adcs::init())    { while (1) { delay(1000); } }
-  if (!adcs::configure()){ while (1) { delay(1000); } }
+  if (!adcs::configure(0b1010, 0b0010)){ while (1) { delay(1000); } }
 }
 
 void loop() {

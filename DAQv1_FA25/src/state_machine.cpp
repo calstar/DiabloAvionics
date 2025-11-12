@@ -1,19 +1,20 @@
-#include <MCP23S17.h>
-#include <ADS126X.h>
-#include <SPI.h>
-#include <state_machine.h>
-#include <solenoid_control.h>
-#include <Arduino.h>
-#include <board_pins.h>
+// #include <MCP23S17.h>
+// #include <ADS126X.h>
+// #include <SPI.h>
+// #include <state_machine.h>
+// #include <solenoid_control.h>
+// #include <Arduino.h>
 
-#define SENSE_CS_1 40
-#define SENSE_DRDY_1 4 
-#define SENSE_CS_2 42
-#define SENSE_DRDY_2 35
-#define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
-#define PYRO_CS_1 48
-#define PYRO_CS_2 48
-
+// #define SENSE_CS_1 40
+// #define SENSE_DRDY_1 4 
+// #define SENSE_CS_2 42
+// #define SENSE_DRDY_2 35
+// #define SOLENOID_ACTIVE_HIGH 1  // set to 0 if LOW = open on your hardware
+// #define PYRO_CS_1 48
+// #define PYRO_CS_2 48
+// #define MOSI 5
+// #define MISO 41
+// #define CLK 13
 
 // // #define SOL_FUP 36 // Fuel upstream solenoid open
 // // #define SOL_FDP 35 // Fuel downstream solenoid open
@@ -28,6 +29,17 @@
 
 // #define UP_PRESSURE 10
 
+// // Pressure transducers
+// // Fuel path
+// #define PT_I 13  // INJECTOR
+// #define PT_P 14 //UPSTREAM PRESSURE FOR BOTH FUEL AND OXIDIZER
+
+// #define PT_O1 9   // OX TANK PRESSURE 
+// #define PT_F1 6 // FUEL TANK PRESSURE
+
+// // LOX path - new pins need to be defined
+// #define PT_O2 10   // LOX DOWNSTREAM pressure
+// #define PT_F2 12 // FUEL DOWNSTREAM pressure
 
 // float calculatePressure(float raw_value, float PT_A, float PT_B, float PT_C, float PT_D) {
 //     return (PT_A * pow(raw_value, 3)) +
@@ -41,8 +53,11 @@
 //   delay(10);
 //   long raw = SENSE_1.readADC1(channel, ADS126X_AINCOM);
 //   float voltage = (float)raw * 5.0 / 2147483648.0;
-//   return voltage;
+//   return voltage; // goblin machine
 // }
+
+
+
 
 // void setup() {
 //   Serial.begin(115200);
@@ -51,48 +66,48 @@
 //   SPI.begin(CLK, MISO, MOSI, -1);
   
 
-//   PYRO_1_MCP = new MCP23S17(PYRO_CS_1, 0x00, &SPI);
-//   PYRO_2_MCP = new MCP23S17(PYRO_CS_2, 0x00, &SPI);
+// //   PYRO_1_MCP = new MCP23S17(PYRO_CS_1, 0x00, &SPI);
+// //   PYRO_2_MCP = new MCP23S17(PYRO_CS_2, 0x00, &SPI);
 
-//   SENSE_1.begin(SENSE_CS_1);
-//   SENSE_1.startADC1();
-//   SENSE_1.setRate(ADS126X_RATE_1200);
-//   SENSE_1.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
-//   uint8_t power = SENSE_1.readRegister(ADS126X_POWER);
-//   power &= ~(1 << 2);
-//   SENSE_1.writeRegister(ADS126X_POWER);
+// //   SENSE_1.begin(SENSE_CS_1);
+// //   SENSE_1.startADC1();
+// //   SENSE_1.setRate(ADS126X_RATE_1200);
+// //   SENSE_1.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
+// //   uint8_t power = SENSE_1.readRegister(ADS126X_POWER);
+// //   power &= ~(1 << 2);
+// //   SENSE_1.writeRegister(ADS126X_POWER);
 
-//   bool status = PYRO_1_MCP->begin();
-//   Serial.println(status ? "Started Pyro 1 GPIO EX" : "Failed to start Pyro 1 GPIO EX");
-//   delay(100);
-//   for (int pin = 0; pin < 7; pin++) {
-//     PYRO_1_MCP->pinMode8(pin, 0x00);
-//     PYRO_1_MCP->write1(pin, 0);
-//   }
+// //   bool status = PYRO_1_MCP->begin();
+// //   Serial.println(status ? "Started Pyro 1 GPIO EX" : "Failed to start Pyro 1 GPIO EX");
+// //   delay(100);
+// //   for (int pin = 0; pin < 7; pin++) {
+// //     PYRO_1_MCP->pinMode8(pin, 0x00);
+// //     PYRO_1_MCP->write1(pin, 0);
+// //   }
 
-//   status = PYRO_2_MCP->begin();
-//   Serial.println(status ? "Started Pyro 2 GPIO EX" : "Failed to start Pyro 2 GPIO EX");
-//   delay(100);
-//   for (int pin = 0; pin < 7; pin++) {
-//     PYRO_2_MCP->pinMode8(pin, 0x00);
-//     PYRO_2_MCP->write1(pin, 0);
-//   }
+// //   status = PYRO_2_MCP->begin();
+// //   Serial.println(status ? "Started Pyro 2 GPIO EX" : "Failed to start Pyro 2 GPIO EX");
+// //   delay(100);
+// //   for (int pin = 0; pin < 7; pin++) {
+// //     PYRO_2_MCP->pinMode8(pin, 0x00);
+// //     PYRO_2_MCP->write1(pin, 0);
+// //   }
 
-//   P_threshold_fuel_current = P_threshold_fuel_base;
-//   P_threshold_fuel_down = P_threshold_fuel_base;
+// //   P_threshold_fuel_current = P_threshold_fuel_base;
+// //   P_threshold_fuel_down = P_threshold_fuel_base;
 
-//   P_threshold_lox_current = P_threshold_lox_base;
-//   P_threshold_lox_down = P_threshold_lox_base;
+// //   P_threshold_lox_current = P_threshold_lox_base;
+// //   P_threshold_lox_down = P_threshold_lox_base;
 
 // }
 
-void loop() {
-  // No Serial parser. Call your control functions from here or other tasks.
-  // Example:
-  openSolenoid(OUP);
-  delay(1000);
-  closeSolenoid(OUP);
-  delay(1000);
+// void loop() {
+//   // No Serial parser. Call your control functions from here or other tasks.
+//   // Example:
+//   openSolenoid(SOL_OUP);
+//   delay(1000);
+//   closeSolenoid(SOL_OUP);
+//   delay(1000);
   
 // }
 
