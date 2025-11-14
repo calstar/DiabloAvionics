@@ -1,6 +1,3 @@
-#include <ADS126X.h>
-#include <SPI.h>
-#include <Arduino.h>
 #include "board_pins.h"
 #include "adcs.h"
 
