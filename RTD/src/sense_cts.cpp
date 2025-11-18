@@ -1,5 +1,6 @@
 #include "adcs.h"
 #include "board_pins.h"
+#include "EthernetHandler.h"
 #include <ADS126X.h>
 #include <Arduino.h>
 #include <SPI.h>
@@ -149,6 +150,20 @@ void setup() {
   Serial.begin(115200);
   SPI.begin(SCLK, MISOp, MOSIp, CS);
 
+  EthernetConfig ethConfig{};
+  ethConfig.pins = {7, 41, 13, 6};
+  ethConfig.staticIP = IPAddress(192, 168, 1, 21);
+  ethConfig.gateway = IPAddress(192, 168, 1, 1);
+  ethConfig.subnet = IPAddress(255, 255, 255, 0);
+  ethConfig.dns = IPAddress(192, 168, 1, 1);
+  ethConfig.receiverIP = IPAddress(192, 168, 1, 1);
+  ethConfig.receiverPort = 5006;
+  ethConfig.localPort = 5005;
+  ethConfig.useNativeEth = true;
+  EthernetInit(ethConfig);
+  Serial.print("RTD Ethernet IP: ");
+  Serial.println(getLocalIP());
+
   if (!adcs::init()) {
     while (1) {
       delay(1000);
@@ -183,6 +198,9 @@ void loop() {
 static inline void flushPacketIfNeeded(bool force = false) {
   uint32_t now = millis();
   if (force || (used > 0 && (now - lastFlushMs >= FLUSH_MS))) {
+    if (ethernetReady()) {
+      sendPacket(active, used);
+    }
     Serial.write(active, used);
     // optional delimiter: Serial.println();
     uint8_t *tmp = active;

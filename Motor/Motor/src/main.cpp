@@ -2,6 +2,9 @@
 
 #include <ESP32Encoder.h>
 #include <Arduino.h>
+#include <cstdio>
+#include <cstring>
+#include "EthernetHandler.h"
 
 ESP32Encoder enc;
 
@@ -90,6 +93,19 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  EthernetConfig ethConfig{};
+  ethConfig.pins = {7, 41, 13, 6};
+  ethConfig.staticIP = IPAddress(192, 168, 2, 103);
+  ethConfig.gateway = IPAddress(192, 168, 2, 1);
+  ethConfig.subnet = IPAddress(255, 255, 255, 0);
+  ethConfig.dns = IPAddress(192, 168, 2, 1);
+  ethConfig.receiverIP = IPAddress(192, 168, 2, 1);
+  ethConfig.receiverPort = 5006;
+  ethConfig.localPort = 5005;
+  EthernetInit(ethConfig);
+  Serial.print("Motor Ethernet IP: ");
+  Serial.println(getLocalIP());
+
   // Encoder
   enc.attachFullQuad(ENCA, ENCB);
   enc.clearCount();
@@ -118,15 +134,36 @@ void loop() {
     print_t0 = millis();
     float deg = CPR_OUT > 0 ? (pos * 360.0f / CPR_OUT) : 0.0f;
     int pwm_now = ledcRead(PWM_CH);
-    Serial.printf("pos=%ld  target=%ld  err=%.0f  dir=%d  pwm=%d  deg=%.1f\n",
-                  pos, target, err, dir_sign, pwm_now, deg);
+    char msg[120];
+    int n = snprintf(msg, sizeof(msg),
+                     "pos=%ld target=%ld err=%.0f dir=%d pwm=%d deg=%.1f",
+                     pos, target, err, dir_sign, pwm_now, deg);
+    Serial.println(msg);
+    if (ethernetReady()) {
+      size_t payloadLen =
+          (n < 0) ? strlen(msg)
+                  : ((n >= static_cast<int>(sizeof(msg))) ? sizeof(msg) - 1
+                                                          : static_cast<size_t>(n));
+      sendPacket(reinterpret_cast<const uint8_t *>(msg), payloadLen);
+    }
   }
 
   // Toggle target every 3 s
   if (millis() - toggle_t0 > 3000) {
     toggle_t0 = millis();
     target = (target == 0) ? 1000 : 0;
-    Serial.printf("New target: %ld counts\n", target);
+    char toggleMsg[48];
+    int n = snprintf(toggleMsg, sizeof(toggleMsg), "New target: %ld counts",
+                     target);
+    Serial.println(toggleMsg);
+    if (ethernetReady()) {
+      size_t payloadLen =
+          (n < 0) ? strlen(toggleMsg)
+                  : ((n >= static_cast<int>(sizeof(toggleMsg)))
+                         ? sizeof(toggleMsg) - 1
+                         : static_cast<size_t>(n));
+      sendPacket(reinterpret_cast<const uint8_t *>(toggleMsg), payloadLen);
+    }
   }
 
   delay(5);

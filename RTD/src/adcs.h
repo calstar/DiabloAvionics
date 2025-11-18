@@ -4,6 +4,7 @@
 #ifndef ADCS_H_
 #define ADCS_H_
 
+#include "board_pins.h"
 #include <ADS126X.h>
 #include <Arduino.h>
 #include <SPI.h>

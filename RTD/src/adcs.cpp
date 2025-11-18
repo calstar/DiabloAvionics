@@ -63,7 +63,7 @@ bool configure(uint8_t negativeReference, uint8_t positiveReference,
 
 ADS126X &device() { return ads; }
 
-ReadResult read(uint8_t channel, uint8_t neg_channel = neg_pin) {
+ReadResult read(uint8_t channel, uint8_t neg_channel) {
   uint32_t read_start = micros();
   ads.readADC1(channel, neg_channel); // TODO: adnan this is dummy read right?
   uint32_t conv_start = micros();
