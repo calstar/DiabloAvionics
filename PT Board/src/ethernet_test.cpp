@@ -1,21 +1,21 @@
-#include <SPI.h>
 #include <Ethernet.h>
 #include <EthernetUdp.h>
+#include <SPI.h>
 
-#define ETH_CLK_PIN   7
-#define ETH_MISO_PIN  41
-#define ETH_MOSI_PIN  13
-#define ETH_CS_PIN    6
+#define ETH_CLK_PIN 39
+#define ETH_MISO_PIN 41
+#define ETH_MOSI_PIN 40
+#define ETH_CS_PIN 38
 
 IPAddress staticIP(192, 168, 2, 100);
 IPAddress gateway(192, 168, 2, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
-IPAddress receiverIP(192, 168, 2, 1);
+IPAddress receiverIP(192, 168, 2, 20);
 const int receiverPort = 5006;
 EthernetUDP udp;
 
-byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 
 void setup() {
   Serial.begin(115200);
@@ -55,7 +55,7 @@ void loop() {
   udp.write(dataBuffer, dataLength);
   udp.endPacket();
 
-  Serial.print("Sent (UDP): ");
+  Serial.print("Sent (UDP) with length" + String(dataLength) + ": ");
   Serial.print(dataToSend);
 
   delay(1000);
