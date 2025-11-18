@@ -1,3 +1,6 @@
 [submodule "libraries/DAQv2-Comms"]
 	path = libraries/DAQv2-Comms
 	url = https://github.com/calstar/DAQv2-Comms
+[submodule "libraries/ADS126X"]
+	path = libraries/ADS126X
+	url = https://github.com/Molorius/ADS126X.git
