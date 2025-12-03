@@ -1,5 +1,8 @@
 # Run the following ater changing this / or on first use:
+# git submodule update --init --recursive
 
+# To add a new submodule, use
+# git submodule add [URL] [LOCATION (ie libraries/STAR_ADS126X)]
 
 [submodule "libraries/DAQv2-Comms"]
 	path = libraries/DAQv2-Comms

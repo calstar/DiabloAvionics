@@ -2,7 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include "my_ADS126X.h"
+#include "STAR_ADS126X.h"
 #include "sense_board_pins.h"
 
 struct ConnectorAdcMapEntry {

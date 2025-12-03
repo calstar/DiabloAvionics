@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include "STAR_ADS126X.h"
+#include "main.h"
+#include "adc_mappings.h"
+
 
 // Change the following line to automatically use the correct pins for the board being tested (PT_Board, LC_Board, RTD_Board, or TC_Board)
 #define PINS_ACTIVE_LAYOUT sense_board_pins::PT_Board
@@ -8,15 +11,6 @@
 // These lines MUST be after the #define PINS_ACTIVE_LAYOUT or they will overwrite it with the default value!
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
-
-// Change the following line to set which connector you are testing
-// Note that that script currently only does single ended testing, referenced to AINCOM!
-#define TEST_CONNECTOR 3
-
-// Change the following line to set which pin on the connector you are testing 
-// For PT/TC, set this to 1. For LC/RTD it can 1 or 2. 
-// Note that for LC, we consider the "positive" pin to be 1 and vice versa
-#define TEST_PIN 1
 
 using namespace sense_board_pins;
 
@@ -47,38 +41,60 @@ void setup() {
   ads126x.stopADC1();
 
   // Set the input to ADC1 to be the whatever pin you want
-  ads126x.setInputMux(getAdcChannel(TEST_CONNECTOR, TEST_PIN), ADS126X_AINCOM);
+  ads126x.setInputMux(ADS126X_AIN0, ADS126X_AINCOM);
 
   // Bypas the PGA, so it does not affect measurements 
   ads126x.bypassPGA();
 
   // Set the filter. You can change this to try different filters
-  ads126x.setFilter(ADS126X_SINC4);
+  ads126x.setFilter(FILTER);
 
   // Set the datarate. You can change this, but the options depends on the filter
   // I do not know what happens if you program an invalid data rate for a given filter
-  ads126x.setRate(ADS126X_RATE_1200);
+  ads126x.setRate(DATA_RATE);
 
   // Start ADC now that configuration is done
   ads126x.startADC1();
 }
 
 void loop() {
-  // Wait for DRDY pin
-  while(digitalRead(Pins.ADC_DRDY_1) != LOW) {
-    delayMicroseconds(10);
+  read_data(READINGS_PER_MUX);
+
+  // Store some variable for the next channel to read
+  // Increment to the next channel here 
+
+  ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
+
+  flush_cycles(settlePulses(FILTER));
+
+  // Implement ethernet buffer saving and sending
+}
+
+void read_data(int count) {
+  for (int i = 0; i < count; i++) {
+    // Wait for data 
+    while(digitalRead(Pins.ADC_DRDY_1) != LOW) {
+      delayMicroseconds(10);
+    }
+
+    // Get reading
+    const auto reading = ads126x.readADC1();
+
+    // Skip if bad checksum
+    if (!reading.checksumValid) {
+      continue;
+    }
+
+    // Do something here (like add it to the buffer idk man)
+    reading.value
   }
-  
-  delayMicroseconds(25);
+}
 
-  // Get the most recent value 
-  const auto reading = ads126x.readADC1();
-  Serial.print(F("Current reading: "));
-  Serial.print(convert_code_to_voltage(reading.value), 6);
-  Serial.println(" V");
-
-  // Checks for invalid checksums, which signal corruption 
-  if (!reading.checksumValid) {
-    Serial.println("Bad checksum!");
+void flush_cycles(int cycles) {
+  for (int i = 0; i < cycles; i++) {
+    // Wait for data 
+    while(digitalRead(Pins.ADC_DRDY_1) != LOW) {
+      delayMicroseconds(10);
+    }
   }
 }
