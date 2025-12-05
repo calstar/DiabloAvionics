@@ -18,9 +18,14 @@ EthernetUDP udp;
 
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("Minimal UDP Sender");
+  Serial.println("Ethernet Test Send Packet Suite");
+  Serial.println("================================");
 
   // Start SPI with custom pins
   SPI.begin(ETH_CLK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN, ETH_CS_PIN);
@@ -34,12 +39,69 @@ void setup() {
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
   delay(1000);
 
-  Serial.println("ESP32 IP: ");
-  Serial.println(Ethernet.localIP());
-
   // Start UDP
   udp.begin(5005);
+
+  // Print board information at initialization
+  Serial.println("\nInitial Board Configuration:");
+  printBoardInfo();
+  Serial.println("\nEntering CLI mode...\n");
+  printMenu();
 }
+
+// ============================================================================
+// BOARD INFORMATION
+// ============================================================================
+
+/**
+ * @brief Prints all board networking information to Serial
+ */
+void printBoardInfo() {
+  Serial.println("--- Board Network Information ---");
+  
+  // IP Configuration
+  Serial.print("Static IP: ");
+  Serial.println(Ethernet.localIP());
+  Serial.print("Gateway: ");
+  Serial.println(gateway);
+  Serial.print("Subnet Mask: ");
+  Serial.println(subnet);
+  Serial.print("DNS Server: ");
+  Serial.println(dns);
+  
+  // MAC Address
+  Serial.print("MAC Address: ");
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) Serial.print(":");
+    if (mac[i] < 0x10) Serial.print("0");
+    Serial.print(mac[i], HEX);
+  }
+  Serial.println();
+  
+  // UDP Configuration
+  Serial.print("UDP Local Port: ");
+  Serial.println(5005);
+  Serial.print("UDP Receiver IP: ");
+  Serial.print(receiverIP);
+  Serial.print(":");
+  Serial.println(receiverPort);
+  
+  // Ethernet Link Status
+  Serial.print("Ethernet Link Status: ");
+  if (Ethernet.linkStatus() == LinkON) {
+    Serial.println("Connected");
+  } else if (Ethernet.linkStatus() == LinkOFF) {
+    Serial.println("Disconnected");
+  } else {
+    Serial.println("Unknown");
+  }
+  
+  Serial.println("--------------------------------");
+}
+
+// ============================================================================
+// PACKET SENDING FUNCTIONS
+// ============================================================================
 
 /**
  * @brief Sends an example message in the old format (string-based)
@@ -68,8 +130,9 @@ void sendExampleMessage() {
  * @brief Creates and sends a Board Heartbeat packet using DiabloComms library
  * This uses the proper packet encoding format defined in the DAQv2-Comms
  * library
+ * @return true if packet was sent successfully, false otherwise
  */
-void sendHeartbeatPacket() {
+bool sendHeartbeatPacket() {
   // Prepare heartbeat packet data
   Diablo::BoardHeartbeatPacket heartbeatData;
   heartbeatData.board_type =
@@ -85,7 +148,7 @@ void sendHeartbeatPacket() {
 
   if (packetSize == 0) {
     Serial.println("Error: Failed to create heartbeat packet");
-    return;
+    return false;
   }
 
   // Send UDP packet
@@ -103,23 +166,98 @@ void sendHeartbeatPacket() {
   Serial.print(static_cast<int>(heartbeatData.engine_state));
   Serial.print(", Board State: ");
   Serial.println(static_cast<int>(heartbeatData.board_state));
+  
+  return true;
+}
+
+/**
+ * @brief Continuously sends heartbeat packets until user cancels
+ * Checks for Serial input to allow cancellation
+ */
+void startHeartbeatLoop() {
+  Serial.println("\nStarting heartbeat packet loop...");
+  Serial.println("Send 'q' or 'quit' to stop sending heartbeats\n");
+  
+  unsigned long lastSendTime = 0;
+  const unsigned long heartbeatInterval = 1000; // 1 second between heartbeats
+  
+  while (true) {
+    // Check for user input to quit
+    if (Serial.available() > 0) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      input.toLowerCase();
+      
+      if (input == "q" || input == "quit") {
+        Serial.println("\nStopping heartbeat loop. Returning to CLI...\n");
+        return;
+      }
+    }
+    
+    // Send heartbeat at specified interval
+    unsigned long currentTime = millis();
+    if (currentTime - lastSendTime >= heartbeatInterval) {
+      sendHeartbeatPacket();
+      lastSendTime = currentTime;
+    }
+    
+    delay(10); // Small delay to prevent overwhelming the serial buffer
+  }
+}
+
+// ============================================================================
+// CLI INTERFACE
+// ============================================================================
+
+/**
+ * @brief Prints the CLI menu options
+ */
+void printMenu() {
+  Serial.println("=== Ethernet Test Suite CLI ===");
+  Serial.println("Commands:");
+  Serial.println("  'i' or 'info'  - Print board information");
+  Serial.println("  'h' or 'heartbeat' - Start sending heartbeat packets");
+  Serial.println("  'm' or 'menu'  - Show this menu");
+  Serial.println("================================\n");
+}
+
+/**
+ * @brief Processes CLI commands from Serial input
+ */
+void processCLI() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    input.toLowerCase();
+    
+    if (input.length() == 0) {
+      return; // Empty input, ignore
+    }
+    
+    if (input == "i" || input == "info") {
+      Serial.println();
+      printBoardInfo();
+      Serial.println();
+    }
+    else if (input == "h" || input == "heartbeat") {
+      startHeartbeatLoop();
+      printMenu();
+    }
+    else if (input == "m" || input == "menu") {
+      printMenu();
+    }
+    else {
+      Serial.print("Unknown command: '");
+      Serial.print(input);
+      Serial.println("'. Type 'm' or 'menu' for available commands.");
+    }
+  }
 }
 
 void loop() {
-  // ============================================================================
-  // PACKET SELECTION - Comment/uncomment the packet type you want to send
-  // ============================================================================
-
-  // Example message (original string-based format)
-  // sendExampleMessage();
-
-  // Board Heartbeat packet (DiabloComms library)
-  sendHeartbeatPacket();
-
-  // TODO: Add more packet types here for test suite:
-  // sendSensorDataPacket();
-  // sendActuatorCommandPacket();
-  // etc.
-
-  delay(1000);
+  // Process CLI commands
+  processCLI();
+  
+  // Small delay to prevent overwhelming the system
+  delay(50);
 }
