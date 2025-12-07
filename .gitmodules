@@ -10,3 +10,6 @@
 [submodule "libraries/STAR_ADS126X"]
 	path = libraries/STAR_ADS126X
 	url = https://github.com/calstar/STAR_ADS126X
+[submodule "ADC_Testing/Stream_ADC_Data/libraries/STAR_ADS126X"]
+	path = ADC_Testing/Stream_ADC_Data/libraries/STAR_ADS126X
+	url = https://github.com/calstar/STAR_ADS126X

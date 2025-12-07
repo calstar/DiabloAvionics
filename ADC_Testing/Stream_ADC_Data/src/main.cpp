@@ -16,6 +16,13 @@ using namespace sense_board_pins;
 
 static ADS126X ads126x;
 
+// Forward declarations
+void read_data(int count);
+void flush_cycles(int cycles);
+
+// TODO: Implement channel cycling logic
+static uint8_t nextChannel = ADS126X_AIN0;
+
 float convert_code_to_voltage(int32_t code) {
   // Assumes the 2.5V internal reference is being used! 
   return ((float)code * 2.5f) / 2147483648.0f;
@@ -23,6 +30,9 @@ float convert_code_to_voltage(int32_t code) {
 
 void setup() {
   Serial.begin(115200);
+  while (!Serial) {
+    delay(10);  // Wait for native USB serial to connect
+  }
 
   // Setup SPI
   SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
@@ -85,8 +95,7 @@ void read_data(int count) {
       continue;
     }
 
-    // Do something here (like add it to the buffer idk man)
-    reading.value
+    Serial.println(reading.value);
   }
 }
 
