@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple ADC Plotter GUI
-- Reads 1000-byte packets from serial (83 samples × 3 channels)
+- Reads packets from serial (83 samples × 3 channels × READINGS_PER_MUX readings)
 - Plots voltage values for connectors 1, 2, 3
 - Requirements: pip install pyqt6 pyqtgraph pyserial numpy
 """
@@ -10,6 +10,7 @@ import sys
 import struct
 import time
 import csv
+import os
 from collections import deque
 from datetime import datetime
 
@@ -19,19 +20,34 @@ import numpy as np
 import serial
 import serial.tools.list_ports
 
+# Import shared config - ensure this matches adc_config.h in the firmware
+# Get the directory where this script is located
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _script_dir)
+from adc_config import READINGS_PER_MUX
+
 pg.setConfigOptions(antialias=False)
 
 # ---------------------- Protocol constants ----------------------
+# NOTE: READINGS_PER_MUX is imported from adc_config.py - must match adc_config.h in firmware
 MAGIC = b"AD26"
-BUFFER_SIZE = 1996  # 4 magic + 83 samples × 3 channels × (4 bytes timestamp + 4 bytes reading)
 MAGIC_SIZE = 4
-SAMPLES_PER_BUFFER = 83
+SAMPLES_PER_BUFFER = 20  # Reduced from 83 to make packets smaller and less bursty
 NUM_CHANNELS = 3
-DATA_SIZE = SAMPLES_PER_BUFFER * NUM_CHANNELS * 8  # 1992 bytes (timestamp + reading per channel)
+# READINGS_PER_MUX is imported from adc_config.py above
+
+# Data structure sizes
+BYTES_PER_TIMESTAMP = 4  # uint32_t in microseconds
+BYTES_PER_READING_VALUE = 4  # int32_t ADC reading
+BYTES_PER_READING = BYTES_PER_TIMESTAMP + BYTES_PER_READING_VALUE  # 8 bytes total per reading
+
+# Buffer size calculation
+DATA_SIZE = SAMPLES_PER_BUFFER * NUM_CHANNELS * READINGS_PER_MUX * BYTES_PER_READING
+BUFFER_SIZE = MAGIC_SIZE + DATA_SIZE
 
 # ADC conversion constants
-V_REF = 2.5
 ADC_SCALE = 2147483648.0  # 2^31
+DEFAULT_V_REF = 5.0  # Default full-scale voltage (V)
 
 BAUD = 115200
 DEFAULT_WINDOW_SECONDS = 10.0
@@ -57,10 +73,11 @@ class Reader(QtCore.QThread):
     status = QtCore.pyqtSignal(str)
     raw_bytes = QtCore.pyqtSignal(bytes)
 
-    def __init__(self, port: str, baud: int):
+    def __init__(self, port: str, baud: int, v_ref: float = DEFAULT_V_REF):
         super().__init__()
         self.port = port
         self.baud = baud
+        self.v_ref = v_ref  # Full-scale voltage for ADC conversion
         self._stop = False
         self.buf = bytearray()
         self.ser = None
@@ -100,17 +117,23 @@ class Reader(QtCore.QThread):
             data = bytes(self.buf[MAGIC_SIZE:BUFFER_SIZE])
             
             # Parse all samples from this packet
-            # Each sample has 3 channels, each with: 4 bytes timestamp + 4 bytes reading
+            # Each sample has NUM_CHANNELS channels, each channel has READINGS_PER_MUX readings
+            # Each reading has: BYTES_PER_TIMESTAMP (timestamp) + BYTES_PER_READING_VALUE (reading)
             for sample_idx in range(SAMPLES_PER_BUFFER):
-                base = sample_idx * NUM_CHANNELS * 8  # 8 bytes per channel (timestamp + reading)
+                # Base offset for this sample
+                sample_base = sample_idx * NUM_CHANNELS * READINGS_PER_MUX * BYTES_PER_READING
                 for ch in range(NUM_CHANNELS):
-                    offset = base + ch * 8
-                    # Extract timestamp (uint32_t, microseconds)
-                    timestamp_us = struct.unpack_from("<I", data, offset)[0]
-                    # Extract reading (int32_t)
-                    raw = struct.unpack_from("<i", data, offset + 4)[0]
-                    volts = raw * V_REF / ADC_SCALE
-                    parsed_samples.append((ch, timestamp_us, volts))
+                    # Base offset for this channel
+                    channel_base = sample_base + ch * READINGS_PER_MUX * BYTES_PER_READING
+                    # Read all readings for this channel
+                    for reading_idx in range(READINGS_PER_MUX):
+                        offset = channel_base + reading_idx * BYTES_PER_READING
+                        # Extract timestamp (uint32_t, microseconds)
+                        timestamp_us = struct.unpack_from("<I", data, offset)[0]
+                        # Extract reading (int32_t)
+                        raw = struct.unpack_from("<i", data, offset + BYTES_PER_TIMESTAMP)[0]
+                        volts = raw * self.v_ref / ADC_SCALE
+                        parsed_samples.append((ch, timestamp_us, volts))
             
             self.packets_received += 1
             self.total_samples += len(parsed_samples)
@@ -185,8 +208,8 @@ class SettingsWindow(QtWidgets.QDialog):
         row.addWidget(self.lbl)
         layout.addLayout(row)
 
-        # Max voltage
-        layout.addWidget(QtWidgets.QLabel("Max voltage (V)"))
+        # Max voltage (Y-axis range)
+        layout.addWidget(QtWidgets.QLabel("Max voltage (V) - Y-axis range"))
         row2 = QtWidgets.QHBoxLayout()
         self.slider_maxv = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider_maxv.setMinimum(5)
@@ -197,6 +220,19 @@ class SettingsWindow(QtWidgets.QDialog):
         row2.addWidget(self.slider_maxv, 1)
         row2.addWidget(self.lbl_maxv)
         layout.addLayout(row2)
+
+        # ADC Full-scale voltage
+        layout.addWidget(QtWidgets.QLabel("ADC Full-scale voltage (V)"))
+        row3 = QtWidgets.QHBoxLayout()
+        self.slider_vref = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.slider_vref.setMinimum(10)  # 1.0V (in 0.1V steps)
+        self.slider_vref.setMaximum(100)  # 10.0V
+        self.slider_vref.setValue(int(self.parent_app.v_ref * 10))
+        self.slider_vref.valueChanged.connect(self._on_change_vref)
+        self.lbl_vref = QtWidgets.QLabel(f"{self.parent_app.v_ref:.1f} V")
+        row3.addWidget(self.slider_vref, 1)
+        row3.addWidget(self.lbl_vref)
+        layout.addLayout(row3)
 
         btn = QtWidgets.QPushButton("Close")
         btn.clicked.connect(self.accept)
@@ -209,6 +245,20 @@ class SettingsWindow(QtWidgets.QDialog):
     def _on_change_maxv(self, val):
         self.parent_app.max_v = float(val) / 10.0
         self.lbl_maxv.setText(f"{self.parent_app.max_v:.1f} V")
+
+    def _on_change_vref(self, val):
+        self.parent_app.v_ref = float(val) / 10.0
+        self.lbl_vref.setText(f"{self.parent_app.v_ref:.1f} V")
+        # Update reader's v_ref if it exists
+        if self.parent_app.reader is not None:
+            self.parent_app.reader.v_ref = self.parent_app.v_ref
+
+    def _on_change_vref(self, val):
+        self.parent_app.v_ref = float(val) / 10.0
+        self.lbl_vref.setText(f"{self.parent_app.v_ref:.1f} V")
+        # Update reader's v_ref if it exists
+        if self.parent_app.reader is not None:
+            self.parent_app.reader.v_ref = self.parent_app.v_ref
 
 
 # ---------------------- Actuator Control Window ----------------------
@@ -729,6 +779,7 @@ class App(QtWidgets.QMainWindow):
         self.actuator_win = None
         self.autoscale = True
         self.max_v = 2.5
+        self.v_ref = DEFAULT_V_REF  # Full-scale voltage for ADC conversion
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -847,9 +898,14 @@ class App(QtWidgets.QMainWindow):
         self.t = {ch: deque(maxlen=MAX_POINTS) for ch in range(NUM_CHANNELS)}
         self.v = {ch: deque(maxlen=MAX_POINTS) for ch in range(NUM_CHANNELS)}
         
-        # For SPS calculation
+        # For SPS and PPS calculation - use longer window and exponential moving average for stability
         self.last_sps_time = None
         self.last_sps_count = 0
+        self.last_pps_count = 0  # Packet count for PPS calculation
+        self.sps_window_seconds = 3.0  # Use 3 second window for more stable calculation
+        self.sps_ema = None  # Exponential moving average of SPS
+        self.pps_ema = None  # Exponential moving average of PPS
+        self.sps_ema_alpha = 0.3  # Smoothing factor (0-1, lower = more smoothing)
 
         # Timer for plot updates - only update when needed
         self.timer = QtCore.QTimer(self)
@@ -905,11 +961,14 @@ class App(QtWidgets.QMainWindow):
         self.packets_received = 0
         self.last_sps_time = None
         self.last_sps_count = 0
+        self.last_pps_count = 0
+        self.sps_ema = None  # Reset EMA on reconnect
+        self.pps_ema = None  # Reset PPS EMA on reconnect
         for ch in range(NUM_CHANNELS):
             self.t[ch].clear()
             self.v[ch].clear()
 
-        self.reader = Reader(port, baud)
+        self.reader = Reader(port, baud, self.v_ref)
         self.reader.samples_ready.connect(self._on_samples, QtCore.Qt.ConnectionType.QueuedConnection)
         self.reader.status.connect(self.set_status, QtCore.Qt.ConnectionType.QueuedConnection)
         self.reader.raw_bytes.connect(self._on_raw_bytes, QtCore.Qt.ConnectionType.QueuedConnection)
@@ -930,6 +989,10 @@ class App(QtWidgets.QMainWindow):
             self.t0_us = first_timestamp_us
             self.last_sps_time = time.monotonic()
             self.last_sps_count = 0
+            self.last_pps_count = 0
+            self.sps_ema = None  # Reset EMA on first sample
+            self.pps_ema = None  # Reset PPS EMA on first sample
+            self.sps_ema = None  # Reset EMA on first sample
         
         # Process each sample with its actual timestamp
         for ch, timestamp_us, volts in samples:
@@ -1002,18 +1065,38 @@ class App(QtWidgets.QMainWindow):
             else:
                 self.plot.setYRange(0.0, float(self.max_v) + 0.1, padding=0)
 
-        # SPS calculation
+        # SPS and PPS calculation - use longer window and exponential moving average for stability
         now = time.monotonic()
         if self.last_sps_time is not None:
             elapsed = now - self.last_sps_time
-            if elapsed >= 1.0:
+            # Use longer window (3 seconds) for more stable calculation
+            if elapsed >= self.sps_window_seconds:
+                # Calculate samples per second
                 samples_delta = self.sample_count - self.last_sps_count
-                sps = samples_delta / elapsed
+                current_sps = samples_delta / elapsed
+                
+                # Apply exponential moving average for smoother display
+                if self.sps_ema is None:
+                    self.sps_ema = current_sps
+                else:
+                    self.sps_ema = self.sps_ema_alpha * current_sps + (1 - self.sps_ema_alpha) * self.sps_ema
+                
+                # Calculate packets per second
+                packets_delta = self.packets_received - self.last_pps_count
+                current_pps = packets_delta / elapsed
+                
+                # Apply exponential moving average for PPS
+                if self.pps_ema is None:
+                    self.pps_ema = current_pps
+                else:
+                    self.pps_ema = self.sps_ema_alpha * current_pps + (1 - self.sps_ema_alpha) * self.pps_ema
+                
                 # Show more info including data points per channel
                 pts = [len(self.t[ch]) for ch in range(NUM_CHANNELS)]
-                self.lbl_sps.setText(f"SPS: {sps:.1f} | Pkts: {self.packets_received} | Pts: {pts}")
+                self.lbl_sps.setText(f"SPS: {self.sps_ema:.1f} | PPS: {self.pps_ema:.1f} | Pkts: {self.packets_received} | Pts: {pts}")
                 self.last_sps_time = now
                 self.last_sps_count = self.sample_count
+                self.last_pps_count = self.packets_received
 
         # Per-channel mean voltage (last 100ms) - only if we have data
         if has_data:
