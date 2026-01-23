@@ -66,7 +66,7 @@ void setup() {
   // SPI.setFrequency(1'000'000);
 
   // Due to the ADC output having valid data on FALLING CLK edges
-  SPI.setDataMode(SPI_MODE1);
+  ADC_SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
 
   // Setup ADC

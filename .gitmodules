@@ -4,3 +4,9 @@
 # To add a new submodule, use
 # git submodule add [URL] [LOCATION (ie libraries/STAR_ADS126X)]
 
+[submodule "libraries/DAQv2-Comms"]
+	path = libraries/DAQv2-Comms
+	url = https://github.com/calstar/DAQv2-Comms
+[submodule "libraries/STAR_ADS126X"]
+	path = libraries/STAR_ADS126X
+	url = https://github.com/calstar/STAR_ADS126X
