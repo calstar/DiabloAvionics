@@ -43,10 +43,12 @@ namespace actuator_board_pins {
         40, 41, 39, 38, 37, 21,
         
         // ACTUATOR_1 through ACTUATOR_10
-        7, 5, 48, 21, 36, 6, 4, 47, 14, 35,
+        //7, 5, 48, 21, 36, 6, 4, 47, 14, 35,
+        4, 6, 14, 21, 35, 5, 7, 21, 48, 36,
 
         // CURRENT_SENSE_1 through CURRENT_SENSE_10
-        18, 9, 13, 11, 1, 17, 8, 10, 12, 2
+        // 18, 9, 13, 11, 1, 17, 8, 10, 12, 2
+        8, 17, 12, 11, 2, 9, 18, 11, 13, 1
     };
 
     // Number of actuators
