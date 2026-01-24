@@ -42,6 +42,11 @@ void setup()
   SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
 
+  //enable pga
+  
+  ads126x.enablePGA();
+  ads126x.setGain(ADS126X_GAIN_8);
+
   // Setup ADC
   ads126x.begin(Pins.ADC_CS_1);
 
