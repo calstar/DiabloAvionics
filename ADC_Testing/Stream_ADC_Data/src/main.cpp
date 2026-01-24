@@ -3,6 +3,7 @@
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <DAQv2-Comms.h>
+#include <cstring>
 #include "STAR_ADS126X.h"
 #include "main.h"
 #include "adc_mappings.h"
@@ -16,6 +17,15 @@
 // These lines MUST be after the #define PINS_ACTIVE_LAYOUT or they will overwrite it with the default value!
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
+
+// Change the following line to set which connector you are testing
+// Note that that script currently only does single ended testing, referenced to AINCOM!
+#define TEST_CONNECTOR 3
+
+// Change the following line to set which pin on the connector you are testing 
+// For PT/TC, set this to 1. For LC/RTD it can 1 or 2. 
+// Note that for LC, we consider the "positive" pin to be 1 and vice versa
+#define TEST_PIN 1
 
 using namespace sense_board_pins;
 
@@ -76,7 +86,7 @@ void setup() {
   ads126x.stopADC1();
 
   // Set the input to ADC1 to be the whatever pin you want
-  ads126x.setInputMux(ADS126X_AIN0, ADS126X_AINCOM);
+  ads126x.setInputMux(getAdcChannel(TEST_CONNECTOR, TEST_PIN), ADS126X_AINCOM);
 
   // Bypas the PGA, so it does not affect measurements 
   ads126x.bypassPGA();
@@ -145,7 +155,7 @@ void loop() {
   // Store some variable for the next channel to read
   // Increment to the next channel here 
 
-  ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
+  // ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
 
   flush_cycles(settlePulses(FILTER));
 }
@@ -169,12 +179,17 @@ void read_data(int count) {
       continue;
     }
 
-    // Store the reading in the chunk
-    // Using the raw ADC value (int32_t) directly
-    chunk.add_datapoint(sensorId, static_cast<uint32_t>(reading.value));
+    // Convert ADC code to voltage
+    float voltage = convert_code_to_voltage(reading.value);
     
-    // Serial.print("ADC Reading: ");
-    // Serial.println(reading.value);
+    // Store voltage in the chunk (reinterpret float bits as uint32_t)
+    uint32_t voltage_bits;
+    memcpy(&voltage_bits, &voltage, sizeof(float));
+    chunk.add_datapoint(sensorId, voltage_bits);
+    
+    Serial.print("Voltage: ");
+    Serial.print(voltage, 6);
+    Serial.println(" V");
   }
 
   // Add the chunk to our collection
