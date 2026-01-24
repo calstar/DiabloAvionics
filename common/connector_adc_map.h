@@ -109,13 +109,23 @@ inline constexpr ConnectorAdcMapEntry RTD_Board_AdcEntries[] = {
     // connector, pin, adc channel, adc index
     { 1, 1, ADS126X_AIN2, 1},
     { 1, 2, ADS126X_AIN3, 1},
+    { 1, 101, ADS126X_AIN1, 1}, // IDAC1, corresponding to the pin 1
+    { 1, 102, ADS126X_AIN4, 1}, // IDAC2, corresponding to the pin 2
+
     { 2, 1, ADS126X_AIN6, 1},
     { 2, 2, ADS126X_AIN7, 1},
+    { 2, 101, ADS126X_AIN5, 1}, // IDAC1
+    { 2, 102, ADS126X_AIN8, 1}, // IDAC2
 
     { 3, 1, ADS126X_AIN2, 2},
     { 3, 2, ADS126X_AIN3, 2},
+    { 1, 101, ADS126X_AIN1, 1}, // IDAC1
+    { 1, 102, ADS126X_AIN4, 1}, // IDAC2
+    
     { 4, 1, ADS126X_AIN6, 2},
     { 4, 2, ADS126X_AIN7, 2},
+    { 2, 101, ADS126X_AIN5, 1}, // IDAC1
+    { 2, 102, ADS126X_AIN8, 1}, // IDAC2
 };
 
 inline constexpr AdcLayout RTD_Board_Adc = {
@@ -136,7 +146,20 @@ inline constexpr const AdcLayout& AdcMap = ADC_LAYOUT_FROM_PINS(PINS_ACTIVE_LAYO
 
 // Function to get adc channel (-1 if invalid)
 constexpr int getAdcChannel(uint8_t connector, uint8_t pin) {
+    // To avoid someone trying to get the IDAC intended pins on the 
+    // RTD board as ADC channels that should be read
+    if (pin > 100) {
+        return -1;
+    }
+
     return AdcMap.get(connector, pin).channel;
+}
+
+// Function to get adc channel for idac intended pins (-1 if invalid)
+constexpr int getIdacChannel(uint8_t connector, uint8_t pin) { 
+    // Look there are reasons we did this but they are hard to explain 
+    // We set the pin number for the IDAC channels to be + 100 since it was the cleanest way
+    return AdcMap.get(connector, pin + 100).channel;
 }
 
 // Function to get adc index (1-based, -1 if invalid)
