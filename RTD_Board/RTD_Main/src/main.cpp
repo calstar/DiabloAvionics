@@ -9,15 +9,6 @@
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 
-// Change the following line to set which connector you are testing
-// Note that that script currently only does single ended testing, referenced to AINCOM!
-#define TEST_CONNECTOR 3
-
-// Change the following line to set which pin on the connector you are testing 
-// For PT/TC, set this to 1. For LC/RTD it can 1 or 2. 
-// Note that for LC, we consider the "positive" pin to be 1 and vice versa
-#define TEST_PIN 1
-
 using namespace sense_board_pins;
 
 static ADS126X ads126x;
@@ -29,6 +20,11 @@ float convert_code_to_voltage(int32_t code) {
 
 void setup() {
   Serial.begin(115200);
+  while (!Serial) {
+    delay(10);
+  }
+
+  delay(1000);
 
   // Setup SPI
   SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
@@ -47,22 +43,8 @@ void setup() {
   ads126x.stopADC1();
 
   // Set the input to ADC1 to be the whatever pin you want
-  ads126x.setInputMux(getAdcChannel(1, 1), getAdcChannel(1, 2));
-
-  // Set IDAC outputs for the input mux pins (RTD excitation) to IDAC_MAG_100
-  {
-    const int idac1 = getIdacChannel(1, 1);
-    const int idac2 = getIdacChannel(1, 2);
-    if (idac1 >= 0) {
-      ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
-      ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
-    }
-    if (idac2 >= 0) {
-      ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
-      ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
-    }
-  }
-
+  ads126x.setInputMux(getAdcChannel(2, 1), getAdcChannel(2, 2));
+  
   // Bypas the PGA, so it does not affect measurements 
   ads126x.bypassPGA();
 
@@ -72,6 +54,20 @@ void setup() {
   // Set the datarate. You can change this, but the options depends on the filter
   // I do not know what happens if you program an invalid data rate for a given filter
   ads126x.setRate(ADS126X_RATE_1200);
+
+  // Set IDAC outputs for the input mux pins (RTD excitation) to IDAC_MAG_100
+  {
+    const int idac1 = getIdacChannel(2, 1);
+    const int idac2 = getIdacChannel(2, 2);
+    if (idac1 >= 0) {
+      ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
+      ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
+    }
+    if (idac2 >= 0) {
+      ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
+      ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
+    }
+  }
 
   // Start ADC now that configuration is done
   ads126x.startADC1();

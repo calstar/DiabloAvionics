@@ -119,13 +119,13 @@ inline constexpr ConnectorAdcMapEntry RTD_Board_AdcEntries[] = {
 
     { 3, 1, ADS126X_AIN2, 2},
     { 3, 2, ADS126X_AIN3, 2},
-    { 1, 101, ADS126X_AIN1, 1}, // IDAC1
-    { 1, 102, ADS126X_AIN4, 1}, // IDAC2
+    { 3, 101, ADS126X_AIN1, 1}, // IDAC1
+    { 3, 102, ADS126X_AIN4, 1}, // IDAC2
     
     { 4, 1, ADS126X_AIN6, 2},
     { 4, 2, ADS126X_AIN7, 2},
-    { 2, 101, ADS126X_AIN5, 1}, // IDAC1
-    { 2, 102, ADS126X_AIN8, 1}, // IDAC2
+    { 4, 101, ADS126X_AIN5, 1}, // IDAC1
+    { 4, 102, ADS126X_AIN8, 1}, // IDAC2
 };
 
 inline constexpr AdcLayout RTD_Board_Adc = {
