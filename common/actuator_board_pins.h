@@ -3,49 +3,35 @@
 //define actuator board pins to be imported where needed
 namespace actuator_board_pins {
     struct Layout {
-        // ETH_MOSI, ETH_MISO, ETH_SCLK, ETH_CS, ETH_INT, ETH_RST
-        int eth_mosi;
-        int eth_miso;
-        int eth_sclk;
-        int eth_cs;
-        int eth_int;
-        int eth_rst;
 
-        // ADC_MOSI, ADC_MISO, ADC_SCLK
-        int adc_mosi;
-        int adc_miso;
-        int adc_sclk;
 
-        // ADC_CS_1, ADC_RESET_1, ADC_START_1, ADC_DRDY_1
-        int adc_cs_1;
-        int adc_reset_1;
-        int adc_start_1;
-        int adc_drdy_1;
+        int ACTUATOR_1;
+        int ACTUATOR_2;
+        int ACTUATOR_3;
+        int ACTUATOR_4;
+        int ACTUATOR_5;
+        int ACTUATOR_6;
+        int ACTUATOR_7;
+        int ACTUATOR_8;
+        int ACTUATOR_9;
+        int ACTUATOR_10;
 
-        // ADC_CS_2, ADC_RESET_2, ADC_START_2, ADC_DRDY_2
-        int adc_cs_2;
-        int adc_reset_2;
-        int adc_start_2;
-        int adc_drdy_2;
+        int CURRENT_SENSE_1;
+        int CURRENT_SENSE_2;
+        int CURRENT_SENSE_3;
+        int CURRENT_SENSE_4;
+        int CURRENT_SENSE_5;
+        int CURRENT_SENSE_6;
+        int CURRENT_SENSE_7;
+        int CURRENT_SENSE_8;
+        int CURRENT_SENSE_9;
+        int CURRENT_SENSE_10;
 
-        // LED
-        int led;
     };
 
     const Layout Actuator_Board = {
-        // ETH_MOSI, ETH_MISO, ETH_SCLK, ETH_CS, ETH_INT, ETH_RST
-        11, 12, 13, 10, 2, 9,
+        7, 5, 48, 21, 36, 6, 4, 47, 14, 35,
 
-        // ADC_MOSI, ADC_MISO, ADC_SCLK
-        7, 6, 5,
-
-        // ADC_CS_1, ADC_RESET_1, ADC_START_1, ADC_DRDY_1
-        4, 3, 8, A0,
-
-        // ADC_CS_2, ADC_RESET_2, ADC_START_2, ADC_DRDY_2
-        A1, A2, A3, A4,
-
-        // LED
-        LED_BUILTIN
+        18, 9, 13, 11, 1, 17, 8, 10, 12, 2
     };
 }
