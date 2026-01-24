@@ -55,11 +55,11 @@ void setup() {
     const int idac2 = getIdacChannel(1, 2);
     if (idac1 >= 0) {
       ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
-      ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_100);
+      ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
     }
     if (idac2 >= 0) {
       ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
-      ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_100);
+      ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
     }
   }
 
