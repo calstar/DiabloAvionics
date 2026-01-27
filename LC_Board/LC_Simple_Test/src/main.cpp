@@ -42,22 +42,17 @@ void setup()
   SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
 
-  //enable pga
-  
-  ads126x.enablePGA();
-  ads126x.setGain(ADS126X_GAIN_8);
-
   // Setup ADC
   ads126x.begin(Pins.ADC_CS_1);
+
+  ads126x.enablePGA();
+  ads126x.setGain(ADS126X_GAIN_8);
 
   // Stop it while we config it, as suggested by datasheet
   ads126x.stopADC1();
 
   // Set the input to ADC1 to be the whatever pin you want
-  ads126x.setInputMux(getAdcChannel(1, 1), getAdcChannel(1,2));
-
-  // Bypas the PGA, so it does not affect measurements
-  ads126x.bypassPGA();
+  ads126x.setInputMux(getAdcChannel(7, 1), getAdcChannel(7,2));
 
   // Set the filter. You can change this to try different filters
   ads126x.setFilter(ADS126X_SINC4);
