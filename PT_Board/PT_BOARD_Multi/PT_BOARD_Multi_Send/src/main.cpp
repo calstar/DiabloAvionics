@@ -40,12 +40,12 @@ SPIClass ADC_SPI(HSPI);   // ADC on HSPI, Ethernet on default SPI (VSPI)
 // Ethernet
 // ---------------------------------------------------------------------------
 byte mac[6];
-IPAddress staticIP(192, 168, 2, 100);
+IPAddress staticIP(192, 168, 2, 101);   // 101 so PT board doesn't conflict with Actuator_Testing (100)
 IPAddress gateway(192, 168, 2, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
-IPAddress receiverIP(192, 168, 2, 20);
-const int receiverPort = 5006;
+IPAddress receiverIP(192, 168, 2, 20);   // Same PC as actuator; different port (5007) for PT data
+const int receiverPort = 5007;           // 5007 so PT and Actuator (5006) can run together
 EthernetUDP udp;
 uint8_t packetBuffer[MAX_PACKET_SIZE];
 
@@ -113,7 +113,7 @@ void setup() {
   delay(300);
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
   delay(300);
-  udp.begin(5005);
+  udp.begin(5007);   // Local port; actuator board uses 5005
 
   Serial.print("IP: ");
   Serial.println(Ethernet.localIP());
@@ -131,6 +131,7 @@ void setup() {
 // ---------------------------------------------------------------------------
 void loop() {
   Diablo::SensorDataChunkCollection chunk(millis(), NUM_PTS);
+  float voltages[NUM_PTS];
 
   for (int conn = 1; conn <= NUM_PTS; conn++) {
     int ch = getAdcChannel(conn, TEST_PIN);
@@ -144,6 +145,7 @@ void loop() {
       else
         v = 0.0f;  // placeholder on read failure
     }
+    voltages[conn - 1] = v;
     uint32_t vbits;
     memcpy(&vbits, &v, sizeof(float));
     chunk.add_datapoint(static_cast<uint8_t>(conn - 1), vbits);
@@ -160,11 +162,14 @@ void loop() {
   udp.write(packetBuffer, n);
   udp.endPacket();
 
-  Serial.print("Sent ");
-  Serial.print(n);
-  Serial.print(" B, ");
-  Serial.print(chunk.size());
-  Serial.println(" PTs");
+  // Print voltages in pt_reading.ino format: pt1 \npt2 pt3 ... pt10 
+  for (int i = 0; i < NUM_PTS; i++) {
+    Serial.print(voltages[i]);
+    Serial.print(" ");
+    if (i == 0) {
+      Serial.println();
+    }
+  }
 
   delay(50);
 }

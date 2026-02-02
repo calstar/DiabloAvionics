@@ -7,12 +7,32 @@ Sends actuator command packets to the actuator board and receives sensor data
 Requirements: pip install pyqt6 pyqtgraph numpy
 """
 
+import os
 import socket
 import struct
 import sys
 import time
 from typing import Optional, Tuple, List, Dict
 from collections import deque
+
+# Fix Qt "cocoa" platform plugin on macOS when Homebrew Qt plugins path lacks platforms/
+if sys.platform == 'darwin':
+    _qt_plugins = os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH')
+    if not _qt_plugins or not os.path.isdir(_qt_plugins):
+        _candidates = [
+            '/opt/homebrew/share/qt/plugins/platforms',
+            '/opt/homebrew/Cellar/qtbase/6.10.1/share/qt/plugins/platforms',
+        ]
+        if os.path.isdir('/opt/homebrew/Cellar/qtbase'):
+            for _name in sorted(os.listdir('/opt/homebrew/Cellar/qtbase'), reverse=True):
+                _p = os.path.join('/opt/homebrew/Cellar/qtbase', _name, 'share', 'qt', 'plugins', 'platforms')
+                if os.path.isdir(_p):
+                    _candidates.insert(1, _p)
+                    break
+        for _p in _candidates:
+            if os.path.isdir(_p) and any(_f.startswith('libqcocoa') for _f in os.listdir(_p)):
+                os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = _p
+                break
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
@@ -533,6 +553,16 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 print(f"Sent command: Actuator {actuator_id} -> {'ON' if actuator_state else 'OFF'}")
             else:
                 print(f"Error: Failed to create packet for actuator {actuator_id}")
+        except OSError as e:
+            err = e.errno
+            if err == 65:  # EHOSTUNREACH on macOS: No route to host
+                msg = f"No route to host — check device IP ({self.device_ip}) and that this computer is on the same network (e.g. 192.168.2.x)"
+            elif err == 64:  # ENETUNREACH: Network unreachable
+                msg = f"Network unreachable — check WiFi/Ethernet and that device IP {self.device_ip} is on the same subnet"
+            else:
+                msg = f"Network error sending command: [{err}] {e}"
+            print(f"Error sending command: {e}")
+            self.status_label.setText(msg)
         except Exception as e:
             print(f"Error sending command: {e}")
             self.status_label.setText(f"Error sending command: {e}")

@@ -6,15 +6,17 @@ Receives DAQv2-Comms SENSOR_DATA packets over UDP from PT_BOARD_Multi_Send,
 decodes them, and displays real-time voltage plots for each PT (1–10).
 
 Ensure the firmware's receiverIP matches this machine's IP (or use 192.168.2.20)
-and that the GUI listens on port 5006.
+and that the GUI listens on port 5007 (PT board). Actuator_Testing uses 5006 so
+both can run together.
 
   pip install -r requirements.txt
-  python pt_multi_gui.py [-p 5006] [-a 0.0.0.0]
+  python pt_multi_gui.py [-p 5007] [-a 0.0.0.0]
 
   On macOS, if you get a segfault: use PyQt5 instead of PyQt6
   (pip install PyQt5; this script will try PyQt5 if PyQt6 is unavailable).
 """
 
+import csv
 import os
 import socket
 import struct
@@ -58,7 +60,7 @@ SENSOR_DATA_CHUNK_SIZE = 4
 SENSOR_DATAPOINT_FORMAT = "<Bf"  # sensor_id uint8, data float (sent as uint32 bits)
 SENSOR_DATAPOINT_SIZE = 5
 
-DEFAULT_PORT = 5006
+DEFAULT_PORT = 5007   # PT board; Actuator_Testing uses 5006 so both can run together
 DEFAULT_WINDOW_SECONDS = 30.0
 MAX_POINTS = 8000
 UPDATE_INTERVAL_MS = 50
@@ -69,6 +71,30 @@ PT_COLORS = [
     (200, 80, 255), (80, 255, 255), (255, 150, 150), (150, 255, 150),
     (150, 200, 255), (255, 255, 80),
 ]
+
+# Per-PT pressure calibration: pressure = A*V^3 + B*V^2 + C*V + D
+# (A, B, C, D) for each PT 1..10. PT 6–10 use PT 1 cal until you add values.
+PT_CALIBRATION = [
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 1
+    (-8.46148513e-09, 3.85591637e-05, 1.50430101e-01, -8.31516318e+01),                     # PT 2
+    (-1.12886040e-08, 5.37687043e-05, 1.24582809e-01, -7.92816379e+01),                     # PT 3
+    (-2.92357884e-09, 1.60928197e-05, 1.73172679e-01, -8.41620248e+01),                     # PT 4
+    (-2.07890243e-09, 7.98159784e-06, 1.92631458e-01, -7.84202084e+01),                     # PT 5
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 6 (placeholder)
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 7 (placeholder)
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 8 (placeholder)
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 9 (placeholder)
+    (-1.14351422603069e-09, 6.07260454422966e-06, 0.0926898002815586, -45.4811452217083),   # PT 10 (placeholder)
+]
+
+PRESSURE_UNIT = "psi"
+
+
+def calculate_pressure(raw_value: float, a: float, b: float, c: float, d: float) -> float:
+    """Convert raw voltage to pressure using polynomial calibration."""
+    v = float(raw_value)
+    return (a * (v ** 3)) + (b * (v ** 2)) + (c * v) + d
+
 
 def parse_packet_header(data: bytes) -> Optional[Tuple[int, int, int]]:
     if len(data) < PACKET_HEADER_SIZE:
@@ -184,6 +210,7 @@ class PTPlotWindow(QtWidgets.QMainWindow):
         self.window_seconds = DEFAULT_WINDOW_SECONDS
         self.sensor_data: Dict[int, deque] = {}
         self.sensor_plots: Dict[int, pg.PlotDataItem] = {}
+        self.plot_enabled: Dict[int, bool] = {i: True for i in range(NUM_PTS)}
         self.stats_start_time = time.time()
         self.receiver = None
         self.init_ui()
@@ -212,6 +239,9 @@ class PTPlotWindow(QtWidgets.QMainWindow):
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self.show_settings)
         top.addWidget(settings_btn)
+        csv_btn = QtWidgets.QPushButton("Download CSV")
+        csv_btn.clicked.connect(self.save_csv)
+        top.addWidget(csv_btn)
         layout.addLayout(top)
         plot_stats = QtWidgets.QHBoxLayout()
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -233,6 +263,26 @@ class PTPlotWindow(QtWidgets.QMainWindow):
         stats_group.setLayout(sl)
         stats_group.setFixedWidth(180)
         plot_stats.addWidget(stats_group)
+        # PT toggles and voltage displays
+        pt_group = QtWidgets.QGroupBox("Channels")
+        pt_layout = QtWidgets.QVBoxLayout()
+        self.pt_toggles: Dict[int, QtWidgets.QCheckBox] = {}
+        self.pt_voltage_labels: Dict[int, QtWidgets.QLabel] = {}
+        for i in range(NUM_PTS):
+            row = QtWidgets.QHBoxLayout()
+            cb = QtWidgets.QCheckBox(self.pt_label(i))
+            cb.setChecked(True)
+            cb.stateChanged.connect(lambda s, idx=i: self._on_plot_toggle(idx, s))
+            self.pt_toggles[i] = cb
+            row.addWidget(cb)
+            vl = QtWidgets.QLabel(f"-- {PRESSURE_UNIT}")
+            vl.setStyleSheet(f"color: rgb{PT_COLORS[i % len(PT_COLORS)]}; font-weight: bold; min-width: 60px;")
+            self.pt_voltage_labels[i] = vl
+            row.addWidget(vl)
+            pt_layout.addLayout(row)
+        pt_group.setLayout(pt_layout)
+        pt_group.setFixedWidth(140)
+        plot_stats.addWidget(pt_group)
         layout.addLayout(plot_stats, 1)
         self.plot_item = self.plot_widget.addPlot(title="PT Voltages")
         self.plot_item.setTitle("PT Voltages", color="w", size="14pt")
@@ -269,6 +319,9 @@ class PTPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
+    def _on_plot_toggle(self, idx: int, state):
+        self.plot_enabled[idx] = bool(state)
+
     def start_receiver(self):
         self.receiver = UDPReceiver(port=self.port, bind_address=self.bind_address)
         self.receiver.sensor_data_received.connect(self.on_sensor_data)
@@ -288,7 +341,15 @@ class PTPlotWindow(QtWidgets.QMainWindow):
         win = self.window_seconds
         for i in range(NUM_PTS):
             d = self.sensor_data[i]
-            if not d:
+            # Update pressure display (converted from voltage)
+            if d:
+                pressure = calculate_pressure(d[-1][1], *PT_CALIBRATION[i])
+                self.pt_voltage_labels[i].setText(f"{pressure:.4f} {PRESSURE_UNIT}")
+            else:
+                self.pt_voltage_labels[i].setText(f"-- {PRESSURE_UNIT}")
+            # Show/hide plot based on toggle
+            self.sensor_plots[i].setVisible(self.plot_enabled[i])
+            if not self.plot_enabled[i] or not d:
                 continue
             times, vals = [], []
             for ti, v in d:
@@ -312,6 +373,42 @@ class PTPlotWindow(QtWidgets.QMainWindow):
         self.bytes_label.setText(f"Bytes: {b/1024:.2f} KB" if b >= 1024 else f"Bytes: {b} B")
         bp = s["bytes_per_sec"]
         self.bps_label.setText(f"Bytes/sec: {bp/1024:.2f} KB/s" if bp >= 1024 else f"Bytes/sec: {bp:.2f} B/s")
+
+    def save_csv(self):
+        """Save all PT timestamp and voltage data to a CSV file."""
+        filepath, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if not filepath:
+            return
+        if not filepath.endswith(".csv"):
+            filepath += ".csv"
+        try:
+            with open(filepath, "w", newline="") as f:
+                writer = csv.writer(f)
+                # Header: timestamp, PT1_voltage, PT2_voltage, ... PT10_voltage
+                header = ["timestamp"] + [f"PT{i+1}_voltage" for i in range(NUM_PTS)]
+                writer.writerow(header)
+                # Collect all unique timestamps across all PTs
+                all_times = set()
+                for i in range(NUM_PTS):
+                    for ti, _ in self.sensor_data[i]:
+                        all_times.add(ti)
+                # For each timestamp, write the voltage for each PT (or empty if no data)
+                for ti in sorted(all_times):
+                    row = [f"{ti:.6f}"]
+                    for i in range(NUM_PTS):
+                        # Find the voltage at this timestamp for this PT
+                        val = ""
+                        for t, v in self.sensor_data[i]:
+                            if t == ti:
+                                val = f"{v:.6f}"
+                                break
+                        row.append(val)
+                    writer.writerow(row)
+            self.status_label.setText(f"Saved CSV to {filepath}")
+        except Exception as e:
+            self.status_label.setText(f"CSV save error: {e}")
 
     def show_settings(self):
         d = QtWidgets.QDialog(self)
