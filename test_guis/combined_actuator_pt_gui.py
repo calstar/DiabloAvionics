@@ -18,8 +18,10 @@ import socket
 import struct
 import sys
 import time
+import json
 from typing import Optional, Tuple, List, Dict
 from collections import deque
+from pathlib import Path
 
 # Prefer PyQt5 on macOS (PyQt6 can segfault with pyqtgraph)
 if sys.platform == "darwin":
@@ -86,6 +88,7 @@ UPDATE_INTERVAL_MS = 50
 ACTUATOR_UPDATE_MS = 100
 DEFAULT_PT_WINDOW_SECONDS = 30.0
 MAX_POINTS = 8000
+ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
 
 PT_COLORS = [
     (255, 80, 80), (80, 255, 80), (80, 150, 255), (255, 200, 80),
@@ -291,8 +294,35 @@ class ActuatorPanel(QtWidgets.QWidget):
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.receiver = None
         self.actuator_widgets = []
+        self.actuator_labels = self.load_labels()
         self.init_ui()
         self.start_receiver()
+
+    def load_labels(self) -> Dict[int, str]:
+        """Load actuator labels from JSON file"""
+        if ACTUATOR_LABELS_FILE.exists():
+            try:
+                with open(ACTUATOR_LABELS_FILE, 'r') as f:
+                    labels = json.load(f)
+                    # Convert string keys to int and ensure all actuators have labels
+                    result = {}
+                    for i in range(NUM_ACTUATORS):
+                        actuator_id = i + 1
+                        key = str(actuator_id)
+                        result[actuator_id] = labels.get(key, "")
+                    return result
+            except Exception as e:
+                print(f"Error loading labels: {e}")
+        return {i + 1: "" for i in range(NUM_ACTUATORS)}
+
+    def save_labels(self):
+        """Save actuator labels to JSON file"""
+        try:
+            labels_dict = {str(k): v for k, v in self.actuator_labels.items()}
+            with open(ACTUATOR_LABELS_FILE, 'w') as f:
+                json.dump(labels_dict, f, indent=2)
+        except Exception as e:
+            print(f"Error saving labels: {e}")
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -314,6 +344,13 @@ class ActuatorPanel(QtWidgets.QWidget):
             id_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             id_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
             fl.addWidget(id_label)
+            # Add label input field
+            label_edit = QtWidgets.QLineEdit()
+            label_edit.setPlaceholderText("Label...")
+            label_edit.setText(self.actuator_labels.get(actuator_id, ""))
+            label_edit.setStyleSheet("font-size: 9pt; padding: 2px;")
+            label_edit.textChanged.connect(lambda text, aid=actuator_id: self.on_label_changed(aid, text))
+            fl.addWidget(label_edit)
             btn_layout = QtWidgets.QHBoxLayout()
             on_btn = QtWidgets.QPushButton("ON")
             on_btn.setMinimumHeight(36)
@@ -333,10 +370,15 @@ class ActuatorPanel(QtWidgets.QWidget):
             voltage_label.setStyleSheet("font-size: 9pt;")
             fl.addWidget(voltage_label)
             grid_layout.addWidget(frame, row, col)
-            self.actuator_widgets.append({"frame": frame, "on_btn": on_btn, "off_btn": off_btn, "voltage_label": voltage_label})
+            self.actuator_widgets.append({"frame": frame, "on_btn": on_btn, "off_btn": off_btn, "voltage_label": voltage_label, "label_edit": label_edit})
         layout.addWidget(grid_container, 1)
         for i in range(NUM_ACTUATORS):
             self.update_button_highlight(i, 0)
+
+    def on_label_changed(self, actuator_id: int, text: str):
+        """Handle label text change"""
+        self.actuator_labels[actuator_id] = text
+        self.save_labels()
 
     def start_receiver(self):
         self.receiver = ActuatorUDPReceiver(port=self.receive_port, bind_address=self.bind_address)
@@ -389,6 +431,7 @@ class ActuatorPanel(QtWidgets.QWidget):
         self.start_receiver()
 
     def stop(self):
+        self.save_labels()
         if self.receiver:
             self.receiver.stop()
             self.receiver.wait(2000)

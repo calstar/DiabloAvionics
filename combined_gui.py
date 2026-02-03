@@ -9,11 +9,13 @@ Requirements: pip install pyqt6 pyqtgraph numpy
 """
 
 import csv
+import json
 import os
 import socket
 import struct
 import sys
 import time
+from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 from collections import deque
 
@@ -92,6 +94,7 @@ MAX_POINTS = 10000
 UPDATE_INTERVAL_MS = 50  # Update plots every 50ms
 NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
 NUM_ACTUATORS = 10
+ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
 
 # Colors for sensors (cycle through if more than this)
 SENSOR_COLORS = [
@@ -791,6 +794,9 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         # Store as voltage in Volts
         self.voltage_readings = [0.0] * NUM_ACTUATORS
         
+        # Actuator labels (1-indexed: 1-10)
+        self.actuator_labels = self.load_labels()
+        
         # UDP socket for sending commands
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
@@ -804,6 +810,37 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         self.update_timer = QtCore.QTimer()
         self.update_timer.timeout.connect(self.update_current_display)
         self.update_timer.start(100)  # Update every 100ms
+    
+    def load_labels(self) -> Dict[int, str]:
+        """Load actuator labels from JSON file"""
+        if ACTUATOR_LABELS_FILE.exists():
+            try:
+                with open(ACTUATOR_LABELS_FILE, 'r') as f:
+                    labels = json.load(f)
+                    # Convert string keys to int and ensure all actuators have labels
+                    result = {}
+                    for i in range(NUM_ACTUATORS):
+                        actuator_id = i + 1
+                        key = str(actuator_id)
+                        result[actuator_id] = labels.get(key, "")
+                    return result
+            except Exception as e:
+                print(f"Error loading labels: {e}")
+        return {i + 1: "" for i in range(NUM_ACTUATORS)}
+    
+    def save_labels(self):
+        """Save actuator labels to JSON file"""
+        try:
+            labels_dict = {str(k): v for k, v in self.actuator_labels.items()}
+            with open(ACTUATOR_LABELS_FILE, 'w') as f:
+                json.dump(labels_dict, f, indent=2)
+        except Exception as e:
+            print(f"Error saving labels: {e}")
+    
+    def on_label_changed(self, actuator_id: int, text: str):
+        """Handle label text change"""
+        self.actuator_labels[actuator_id] = text
+        self.save_labels()
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -858,6 +895,14 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
             id_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             id_label.setStyleSheet("font-weight: bold; font-size: 12pt; padding: 5px;")
             actuator_layout.addWidget(id_label)
+            
+            # Label input field
+            label_edit = QtWidgets.QLineEdit()
+            label_edit.setPlaceholderText("Label...")
+            label_edit.setText(self.actuator_labels.get(actuator_id, ""))
+            label_edit.setStyleSheet("font-size: 9pt; padding: 2px;")
+            label_edit.textChanged.connect(lambda text, aid=actuator_id: self.on_label_changed(aid, text))
+            actuator_layout.addWidget(label_edit)
             
             # Button container
             button_container = QtWidgets.QHBoxLayout()
@@ -914,7 +959,8 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 'frame': actuator_frame,
                 'on_btn': on_btn,
                 'off_btn': off_btn,
-                'voltage_label': voltage_label
+                'voltage_label': voltage_label,
+                'label_edit': label_edit
             })
         
         layout.addWidget(grid_container, 1)
@@ -1049,6 +1095,7 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event"""
+        self.save_labels()
         if self.command_sock:
             try:
                 self.command_sock.close()
