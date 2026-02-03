@@ -55,6 +55,7 @@ SENSOR_DATAPOINT_SIZE = 5
 DEFAULT_WINDOW_SECONDS = 10.0
 MAX_POINTS = 10000
 UPDATE_INTERVAL_MS = 50  # Update plots every 50ms
+NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
 
 # Colors for sensors (cycle through if more than this)
 SENSOR_COLORS = [
@@ -255,6 +256,8 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.port = port
         self.bind_address = bind_address
         self.window_seconds = DEFAULT_WINDOW_SECONDS
+        self.display_moving_avg_samples = 10  # Moving average for displayed values
+        self.graph_moving_avg_samples = 1  # Moving average for graphed lines (1 = no smoothing)
         
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}
@@ -315,8 +318,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         plot_stats_layout.addWidget(self.plot_widget, 1)  # Takes most of the space
         
         # Statistics panel on the right
-        stats_group = QtWidgets.QGroupBox("Statistics")
-        stats_layout = QtWidgets.QVBoxLayout()
+        stats_widget = QtWidgets.QWidget()
+        stats_main_layout = QtWidgets.QVBoxLayout(stats_widget)
+        stats_main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Network statistics group
+        network_stats_group = QtWidgets.QGroupBox("Network")
+        network_stats_layout = QtWidgets.QVBoxLayout()
         
         self.packets_label = QtWidgets.QLabel("Packets: 0")
         self.pps_label = QtWidgets.QLabel("Packets/sec: 0.0")
@@ -325,28 +333,93 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         
         # Increase font size for statistics
         font = QtGui.QFont()
-        font.setPointSize(11)
+        font.setPointSize(10)
         self.packets_label.setFont(font)
         self.pps_label.setFont(font)
         self.bytes_label.setFont(font)
         self.bps_label.setFont(font)
         
-        stats_layout.addWidget(self.packets_label)
-        stats_layout.addWidget(self.pps_label)
-        stats_layout.addWidget(self.bytes_label)
-        stats_layout.addWidget(self.bps_label)
-        stats_layout.addStretch()  # Push stats to top
-        stats_group.setLayout(stats_layout)
-        stats_group.setFixedWidth(200)  # Fixed width for stats panel
-        plot_stats_layout.addWidget(stats_group)
+        network_stats_layout.addWidget(self.packets_label)
+        network_stats_layout.addWidget(self.pps_label)
+        network_stats_layout.addWidget(self.bytes_label)
+        network_stats_layout.addWidget(self.bps_label)
+        network_stats_group.setLayout(network_stats_layout)
+        stats_main_layout.addWidget(network_stats_group)
+        
+        # Connector statistics group with scrollable area
+        connector_stats_group = QtWidgets.QGroupBox("Sensors")
+        connector_stats_group_layout = QtWidgets.QVBoxLayout()
+        
+        # Moving average controls
+        ma_group = QtWidgets.QGroupBox("Moving Average")
+        ma_group_layout = QtWidgets.QVBoxLayout()
+        
+        # Graph moving average
+        graph_ma_layout = QtWidgets.QHBoxLayout()
+        graph_ma_layout.addWidget(QtWidgets.QLabel("Graph:"))
+        self.graph_ma_spinbox = QtWidgets.QSpinBox()
+        self.graph_ma_spinbox.setMinimum(1)
+        self.graph_ma_spinbox.setMaximum(100)
+        self.graph_ma_spinbox.setValue(self.graph_moving_avg_samples)
+        self.graph_ma_spinbox.setSuffix(" samples")
+        self.graph_ma_spinbox.valueChanged.connect(self.on_graph_moving_avg_changed)
+        graph_ma_layout.addWidget(self.graph_ma_spinbox)
+        ma_group_layout.addLayout(graph_ma_layout)
+        
+        # Display moving average
+        display_ma_layout = QtWidgets.QHBoxLayout()
+        display_ma_layout.addWidget(QtWidgets.QLabel("Display:"))
+        self.display_ma_spinbox = QtWidgets.QSpinBox()
+        self.display_ma_spinbox.setMinimum(1)
+        self.display_ma_spinbox.setMaximum(100)
+        self.display_ma_spinbox.setValue(self.display_moving_avg_samples)
+        self.display_ma_spinbox.setSuffix(" samples")
+        self.display_ma_spinbox.valueChanged.connect(self.on_display_moving_avg_changed)
+        display_ma_layout.addWidget(self.display_ma_spinbox)
+        ma_group_layout.addLayout(display_ma_layout)
+        
+        ma_group.setLayout(ma_group_layout)
+        connector_stats_group_layout.addWidget(ma_group)
+        
+        # Scrollable area for connector values
+        connector_scroll = QtWidgets.QScrollArea()
+        connector_scroll.setWidgetResizable(True)
+        connector_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        connector_stats_content = QtWidgets.QWidget()
+        connector_stats_layout = QtWidgets.QVBoxLayout(connector_stats_content)
+        connector_stats_layout.setSpacing(5)
+        
+        # Create labels for each connector
+        self.connector_labels = {}
+        small_font = QtGui.QFont()
+        small_font.setPointSize(9)
+        
+        for i in range(1, NUM_CONNECTORS + 1):
+            label = QtWidgets.QLabel(f"C{i}: --- V")
+            label.setFont(small_font)
+            color_idx = i % len(SENSOR_COLORS)
+            color = SENSOR_COLORS[color_idx]
+            label.setStyleSheet(f"color: rgb{color}; padding: 2px;")
+            connector_stats_layout.addWidget(label)
+            self.connector_labels[i] = label
+        
+        connector_stats_layout.addStretch()  # Push connectors to top
+        connector_scroll.setWidget(connector_stats_content)
+        connector_stats_group_layout.addWidget(connector_scroll)
+        connector_stats_group.setLayout(connector_stats_group_layout)
+        stats_main_layout.addWidget(connector_stats_group, 1)
+        
+        stats_widget.setFixedWidth(250)  # Fixed width for stats panel
+        plot_stats_layout.addWidget(stats_widget)
         
         layout.addLayout(plot_stats_layout, 1)
         
         # Create initial plot (will be updated when sensors are discovered)
-        self.plot_item = self.plot_widget.addPlot(title="Sensor Data Over Time")
+        self.plot_item = self.plot_widget.addPlot(title="Sensor Data Over Time (Sensors 1-10)")
         
         # Set title color and size to white for visibility on black background
-        self.plot_item.setTitle("Sensor Data Over Time", color='w', size='14pt')
+        self.plot_item.setTitle("Sensor Data Over Time (Sensors 1-10)", color='w', size='14pt')
         
         # Set axis labels to white
         self.plot_item.setLabel('left', 'Voltage (V)', color='w')
@@ -392,6 +465,23 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             # Set legend label text color to white
             # The legend items will be updated when sensors are added
         
+        # Pre-initialize plots for all 10 connectors
+        self.init_connector_plots()
+        
+    def init_connector_plots(self):
+        """Pre-initialize plots for all 10 connectors"""
+        for connector_id in range(1, NUM_CONNECTORS + 1):
+            self.sensor_data[connector_id] = deque(maxlen=MAX_POINTS)
+            self.add_sensor_plot(connector_id)
+    
+    def on_graph_moving_avg_changed(self, value):
+        """Handle graph moving average window size change"""
+        self.graph_moving_avg_samples = value
+    
+    def on_display_moving_avg_changed(self, value):
+        """Handle display moving average window size change"""
+        self.display_moving_avg_samples = value
+    
     def start_receiver(self):
         """Start the UDP receiver thread"""
         self.receiver = UDPReceiver(port=self.port, bind_address=self.bind_address)
@@ -422,7 +512,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                 sensor_id = dp['sensor_id']
                 value = dp['data']
                 
-                # Initialize sensor data storage if needed
+                # Initialize sensor data storage if needed (for sensors outside 1-10 range)
                 if sensor_id not in self.sensor_data:
                     self.sensor_data[sensor_id] = deque(maxlen=MAX_POINTS)
                     self.add_sensor_plot(sensor_id)
@@ -475,12 +565,23 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                     values.append(v)
             
             if len(times) > 0:
-                # Convert to numpy arrays for plotting
+                # Convert to numpy arrays
                 times_array = np.array(times)
                 values_array = np.array(values)
                 
-                # Update plot
-                self.sensor_plots[sensor_id].setData(times_array, values_array)
+                # Apply moving average smoothing to graph if window > 1
+                if self.graph_moving_avg_samples > 1 and len(values_array) >= self.graph_moving_avg_samples:
+                    # Use convolution for efficient moving average
+                    kernel = np.ones(self.graph_moving_avg_samples) / self.graph_moving_avg_samples
+                    smoothed_values = np.convolve(values_array, kernel, mode='valid')
+                    # Adjust times array to match smoothed data length
+                    smoothed_times = times_array[self.graph_moving_avg_samples - 1:]
+                    
+                    # Update plot with smoothed data
+                    self.sensor_plots[sensor_id].setData(smoothed_times, smoothed_values)
+                else:
+                    # Update plot with raw data
+                    self.sensor_plots[sensor_id].setData(times_array, values_array)
         
         # Update x-axis range
         if current_time > time_window:
@@ -517,6 +618,27 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         else:
             bps_str = f"{bps / (1024 * 1024):.2f} MB/s"
         self.bps_label.setText(f"Bytes/sec: {bps_str}")
+        
+        # Update per-connector statistics
+        for connector_id in range(1, NUM_CONNECTORS + 1):
+            if connector_id in self.sensor_data and len(self.sensor_data[connector_id]) > 0:
+                # Get latest values
+                values = [v for t, v in self.sensor_data[connector_id]]
+                if values:
+                    current = values[-1]
+                    
+                    # Calculate moving average over last N samples for display
+                    n_samples = min(self.display_moving_avg_samples, len(values))
+                    moving_avg = sum(values[-n_samples:]) / n_samples
+                    
+                    self.connector_labels[connector_id].setText(
+                        f"C{connector_id}: {current:.4f} V\n"
+                        f"  MA: {moving_avg:.4f} V"
+                    )
+                else:
+                    self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
+            else:
+                self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
     
     def show_settings(self):
         """Show settings dialog"""

@@ -39,9 +39,10 @@ void sendSensorDataPacket(const Diablo::SensorDataChunkCollection &chunk);
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    delay(10);  // Wait for native USB serial to connect
-  }
+  
+  // while (!Serial) {a
+  //   delay(10);  // Wait for native USB serial to connect
+  // }
 
   Serial.println("Starting Actuator Testing with Ethernet...");
 

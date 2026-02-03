@@ -18,14 +18,13 @@
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 
-// Change the following line to set which connector you are testing
-// Note that that script currently only does single ended testing, referenced to AINCOM!
-#define TEST_CONNECTOR 3
-
-// Change the following line to set which pin on the connector you are testing 
-// For PT/TC, set this to 1. For LC/RTD it can 1 or 2. 
-// Note that for LC, we consider the "positive" pin to be 1 and vice versa
+// Cycling through connectors 1-10
+// Note that this script currently only does single ended testing, referenced to AINCOM!
+// For PT/TC boards, using pin 1. For LC/RTD you may want to change this to 1 or 2.
 #define TEST_PIN 1
+
+// Current connector being read (cycles from 1 to 10)
+static uint8_t currentConnector = 1;
 
 using namespace sense_board_pins;
 
@@ -85,8 +84,11 @@ void setup() {
   // Stop it while we config it, as suggested by datasheet
   ads126x.stopADC1();
 
-  // Set the input to ADC1 to be the whatever pin you want
-  ads126x.setInputMux(getAdcChannel(TEST_CONNECTOR, TEST_PIN), ADS126X_AINCOM);
+  // Set the input to ADC1 to be connector 1 initially
+  ads126x.setInputMux(getAdcChannel(currentConnector, TEST_PIN), ADS126X_AINCOM);
+  
+  // Set initial sensor ID to current connector
+  sensorId = currentConnector;
 
   // Bypas the PGA, so it does not affect measurements 
   ads126x.bypassPGA();
@@ -152,10 +154,17 @@ void loop() {
     dataChunks.clear();
   }
 
-  // Store some variable for the next channel to read
-  // Increment to the next channel here 
-
-  // ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
+  // Cycle to the next connector (1 through 10)
+  currentConnector++;
+  if (currentConnector > 10) {
+    currentConnector = 1;
+  }
+  
+  // Update sensor ID to match the connector number
+  sensorId = currentConnector;
+  
+  // Set the ADC input mux to the new connector's channel
+  ads126x.setInputMux(getAdcChannel(currentConnector, TEST_PIN), ADS126X_AINCOM);
 
   flush_cycles(settlePulses(FILTER));
 }
@@ -186,10 +195,6 @@ void read_data(int count) {
     uint32_t voltage_bits;
     memcpy(&voltage_bits, &voltage, sizeof(float));
     chunk.add_datapoint(sensorId, voltage_bits);
-    
-    Serial.print("Voltage: ");
-    Serial.print(voltage, 6);
-    Serial.println(" V");
   }
 
   // Add the chunk to our collection
