@@ -377,6 +377,10 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.display_moving_avg_samples = 10  # Moving average for displayed values
         self.graph_moving_avg_samples = 1  # Moving average for graphed lines (1 = no smoothing)
         
+        # ADC conversion settings
+        self.adc_bits = 32  # ADC bit count (default: 32-bit)
+        self.reference_voltage = 2.5  # Reference voltage in Volts (default: 2.5V)
+        
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}
         self.sensor_plots: Dict[int, pg.PlotDataItem] = {}
@@ -614,6 +618,24 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         """Handle display moving average window size change"""
         self.display_moving_avg_samples = value
     
+    def code_to_voltage(self, code_uint32: int) -> float:
+        """
+        Convert raw ADC code to voltage.
+        code_uint32: uint32_t representation of the ADC code
+        Returns: voltage in Volts
+        """
+        # Reinterpret uint32_t as int32_t (signed)
+        if code_uint32 >= 0x80000000:
+            code_int32 = code_uint32 - 0x100000000
+        else:
+            code_int32 = code_uint32
+        
+        # Convert to voltage using user-specified settings
+        # For signed ADC: voltage = (code * ref_voltage) / (2^(bits-1))
+        max_code = 2 ** (self.adc_bits - 1)
+        voltage = (code_int32 * self.reference_voltage) / max_code
+        return voltage
+    
     def on_status_update(self, message: str):
         """Handle status updates from receiver thread"""
         self.status_label.setText(message)
@@ -633,7 +655,10 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             
             for dp in chunk['datapoints']:
                 sensor_id = dp['sensor_id']
-                value = dp['data']
+                code_uint32 = dp['data']  # Received as uint32_t (reinterpreted from int32_t)
+                
+                # Convert code to voltage
+                voltage = self.code_to_voltage(int(code_uint32))
                 
                 # Initialize sensor data storage if needed (for sensors outside 1-10 range)
                 if sensor_id not in self.sensor_data:
@@ -641,7 +666,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                     self.add_sensor_plot(sensor_id)
                 
                 # Add data point (use relative time from start)
-                self.sensor_data[sensor_id].append((relative_time, value))
+                self.sensor_data[sensor_id].append((relative_time, voltage))
     
     def add_sensor_plot(self, sensor_id: int):
         """Add a new sensor plot"""
@@ -776,6 +801,8 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         dialog = SensorSettingsDialog(self)
         if dialog.exec():
             self.window_seconds = dialog.window_seconds
+            self.adc_bits = dialog.adc_bits
+            self.reference_voltage = dialog.reference_voltage
 
 
 # ---------------------- Actuator Control Window ----------------------
@@ -1110,6 +1137,8 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Sensor Display Settings")
         self.window_seconds = parent.window_seconds
+        self.adc_bits = parent.adc_bits
+        self.reference_voltage = parent.reference_voltage
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -1120,20 +1149,51 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         self.slider.setMinimum(1)
         self.slider.setMaximum(60)
         self.slider.setValue(int(self.window_seconds))
-        self.slider.valueChanged.connect(self._on_change)
+        self.slider.valueChanged.connect(self._on_time_window_change)
         self.lbl = QtWidgets.QLabel(f"{self.window_seconds:.1f}s")
         row.addWidget(self.slider, 1)
         row.addWidget(self.lbl)
         layout.addLayout(row)
+        
+        # ADC Settings group
+        adc_group = QtWidgets.QGroupBox("ADC Conversion Settings")
+        adc_layout = QtWidgets.QVBoxLayout()
+        
+        # ADC bit count
+        adc_layout.addWidget(QtWidgets.QLabel("ADC Bit Count:"))
+        self.adc_bits_spinbox = QtWidgets.QSpinBox()
+        self.adc_bits_spinbox.setRange(8, 32)
+        self.adc_bits_spinbox.setValue(self.adc_bits)
+        self.adc_bits_spinbox.setSuffix(" bits")
+        adc_layout.addWidget(self.adc_bits_spinbox)
+        
+        # Reference voltage
+        adc_layout.addWidget(QtWidgets.QLabel("Reference Voltage (V):"))
+        self.ref_voltage_spinbox = QtWidgets.QDoubleSpinBox()
+        self.ref_voltage_spinbox.setRange(0.1, 10.0)
+        self.ref_voltage_spinbox.setSingleStep(0.1)
+        self.ref_voltage_spinbox.setDecimals(3)
+        self.ref_voltage_spinbox.setValue(self.reference_voltage)
+        self.ref_voltage_spinbox.setSuffix(" V")
+        adc_layout.addWidget(self.ref_voltage_spinbox)
+        
+        adc_group.setLayout(adc_layout)
+        layout.addWidget(adc_group)
         
         # Close button
         btn = QtWidgets.QPushButton("Close")
         btn.clicked.connect(self.accept)
         layout.addWidget(btn)
     
-    def _on_change(self, val):
+    def _on_time_window_change(self, val):
         self.window_seconds = float(val)
         self.lbl.setText(f"{float(val):.1f}s")
+    
+    def accept(self):
+        """Update values when dialog is accepted"""
+        self.adc_bits = self.adc_bits_spinbox.value()
+        self.reference_voltage = self.ref_voltage_spinbox.value()
+        super().accept()
 
 
 class ActuatorSettingsDialog(QtWidgets.QDialog):

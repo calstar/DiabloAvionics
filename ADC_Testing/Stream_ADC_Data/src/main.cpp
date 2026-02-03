@@ -67,6 +67,13 @@ void setup() {
   // }
 
   Serial.println("Starting ADC with Ethernet...");
+  
+  // Print reference configuration
+  #if USE_VDD_REFERENCE
+    Serial.println("ADC Reference: VDD");
+  #else
+    Serial.println("ADC Reference: Internal 2.5V");
+  #endif
 
   // Setup ADC SPI
   ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
@@ -86,6 +93,15 @@ void setup() {
 
   // Set the input to ADC1 to be connector 1 initially
   ads126x.setInputMux(getAdcChannel(currentConnector, TEST_PIN), ADS126X_AINCOM);
+
+  // Set the reference voltage based on configuration in main.h
+  #if USE_VDD_REFERENCE
+    // Using VDD as reference (typically 3.3V or 5V depending on board)
+    ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
+  #else
+    // Using internal 2.5V reference (default if setReference is not called)
+    // No call to setReference() - ADC defaults to internal reference
+  #endif
   
   // Set initial sensor ID to current connector
   sensorId = currentConnector;
@@ -188,13 +204,11 @@ void read_data(int count) {
       continue;
     }
 
-    // Convert ADC code to voltage
-    float voltage = convert_code_to_voltage(reading.value);
-    
-    // Store voltage in the chunk (reinterpret float bits as uint32_t)
-    uint32_t voltage_bits;
-    memcpy(&voltage_bits, &voltage, sizeof(float));
-    chunk.add_datapoint(sensorId, voltage_bits);
+    // Send raw ADC code instead of voltage
+    // Reinterpret the int32_t code as uint32_t for the packet
+    uint32_t code_as_uint32;
+    memcpy(&code_as_uint32, &reading.value, sizeof(int32_t));
+    chunk.add_datapoint(sensorId, code_as_uint32);
   }
 
   // Add the chunk to our collection
