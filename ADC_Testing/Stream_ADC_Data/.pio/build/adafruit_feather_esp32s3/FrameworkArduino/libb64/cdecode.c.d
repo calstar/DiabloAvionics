@@ -1,3 +1,3 @@
 .pio/build/adafruit_feather_esp32s3/FrameworkArduino/libb64/cdecode.c.o: \
- C:/Users/aidan/.platformio/packages/framework-arduinoespressif32/cores/esp32/libb64/cdecode.c \
- C:/Users/aidan/.platformio/packages/framework-arduinoespressif32/cores/esp32/libb64/cdecode.h
+ /Users/theop/.platformio/packages/framework-arduinoespressif32/cores/esp32/libb64/cdecode.c \
+ /Users/theop/.platformio/packages/framework-arduinoespressif32/cores/esp32/libb64/cdecode.h

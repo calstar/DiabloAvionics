@@ -62,9 +62,9 @@ float convert_code_to_voltage(int32_t code) {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    delay(10);  // Wait for native USB serial to connect
-  }
+  // while (!Serial) {
+  //   delay(10);  // Wait for native USB serial to connect
+  // }
 
   Serial.println("Starting ADC with Ethernet...");
 

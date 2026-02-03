@@ -8,6 +8,7 @@ Opens two separate windows:
 Requirements: pip install pyqt6 pyqtgraph numpy
 """
 
+import csv
 import os
 import socket
 import struct
@@ -15,6 +16,12 @@ import sys
 import time
 from typing import Optional, Tuple, List, Dict
 from collections import deque
+
+# PT calibration CSV (relative to this file); used to show psi for connectors 1–3
+PT_CALIBRATION_CSV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "PT_Board", "Calibration", "PT Calibration Attempt 2026-02-03_test5.csv"
+)
 
 # Fix Qt "cocoa" platform plugin on macOS when Homebrew Qt plugins path lacks platforms/
 if sys.platform == 'darwin':
@@ -101,6 +108,40 @@ SENSOR_COLORS = [
 ]
 
 pg.setConfigOptions(antialias=False)
+
+
+# ---------------------- PT pressure from calibration ----------------------
+def calculate_pressure(raw_value: float, PT_A: float, PT_B: float, PT_C: float, PT_D: float) -> float:
+    """Compute pressure (psi) from raw voltage using cubic polynomial (matches C++ calculatePressure)."""
+    return (PT_A * (raw_value ** 3)) + (PT_B * (raw_value ** 2)) + (PT_C * raw_value) + PT_D
+
+
+def load_pt_calibration(csv_path: str) -> Dict[int, Tuple[float, float, float, float]]:
+    """
+    Load PT calibration coefficients from CSV.
+    Returns dict: connector_id (1–3) -> (PT_A, PT_B, PT_C, PT_D).
+    CSV columns per PT: Voltage, Pressure, Coefficient 0 (A), 1 (B), 2 (C), 3 (D).
+    Uses the last data row as the calibration coefficients.
+    """
+    result = {}
+    if not os.path.isfile(csv_path):
+        return result
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return result
+        # Use last row for coefficients (final calibration state)
+        last = rows[-1]
+        for pt_num in (1, 2, 3):
+            a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
+            b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
+            c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
+            d = float(last.get(f"PT{pt_num} Coefficient 3", 0))
+            result[pt_num] = (a, b, c, d)
+        return result
+    except Exception:
+        return result
 
 
 # ---------------------- Protocol Functions ----------------------
@@ -336,9 +377,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}
         self.sensor_plots: Dict[int, pg.PlotDataItem] = {}
+        self.plot_enabled: Dict[int, bool] = {i: True for i in range(1, NUM_CONNECTORS + 1)}
         
         # Statistics
         self.stats_start_time = time.time()
+        
+        # PT calibration for connectors 1–3 (connector_id -> (PT_A, PT_B, PT_C, PT_D))
+        self.pt_calibration = load_pt_calibration(PT_CALIBRATION_CSV)
         
         self.init_ui()
         
@@ -465,18 +510,27 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         connector_stats_layout = QtWidgets.QVBoxLayout(connector_stats_content)
         connector_stats_layout.setSpacing(5)
         
-        # Create labels for each connector
+        # Create labels and plot toggles for each connector
         self.connector_labels = {}
+        self.connector_toggles: Dict[int, QtWidgets.QCheckBox] = {}
         small_font = QtGui.QFont()
         small_font.setPointSize(9)
         
         for i in range(1, NUM_CONNECTORS + 1):
+            row = QtWidgets.QHBoxLayout()
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(True)
+            cb.stateChanged.connect(lambda s, cid=i: self._on_plot_toggle(cid, s))
+            self.connector_toggles[i] = cb
+            row.addWidget(cb)
             label = QtWidgets.QLabel(f"C{i}: --- V")
             label.setFont(small_font)
+            label.setTextFormat(QtCore.Qt.TextFormat.RichText)
             color_idx = i % len(SENSOR_COLORS)
             color = SENSOR_COLORS[color_idx]
             label.setStyleSheet(f"color: rgb{color}; padding: 2px;")
-            connector_stats_layout.addWidget(label)
+            row.addWidget(label)
+            connector_stats_layout.addLayout(row)
             self.connector_labels[i] = label
         
         connector_stats_layout.addStretch()  # Push connectors to top
@@ -546,6 +600,9 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             self.sensor_data[connector_id] = deque(maxlen=MAX_POINTS)
             self.add_sensor_plot(connector_id)
     
+    def _on_plot_toggle(self, connector_id: int, state):
+        self.plot_enabled[connector_id] = bool(state)
+    
     def on_graph_moving_avg_changed(self, value):
         """Handle graph moving average window size change"""
         self.graph_moving_avg_samples = value
@@ -585,6 +642,8 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
     
     def add_sensor_plot(self, sensor_id: int):
         """Add a new sensor plot"""
+        if sensor_id not in self.plot_enabled:
+            self.plot_enabled[sensor_id] = True
         color_idx = sensor_id % len(SENSOR_COLORS)
         color = SENSOR_COLORS[color_idx]
         
@@ -613,7 +672,10 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         for sensor_id, data_deque in self.sensor_data.items():
             if sensor_id not in self.sensor_plots:
                 continue
-            
+            enabled = self.plot_enabled.get(sensor_id, True)
+            self.sensor_plots[sensor_id].setVisible(enabled)
+            if not enabled:
+                continue
             if len(data_deque) == 0:
                 continue
             
@@ -694,10 +756,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                     n_samples = min(self.display_moving_avg_samples, len(values))
                     moving_avg = sum(values[-n_samples:]) / n_samples
                     
-                    self.connector_labels[connector_id].setText(
-                        f"C{connector_id}: {current:.4f} V\n"
-                        f"  MA: {moving_avg:.4f} V"
-                    )
+                    text = f"C{connector_id}: {current:.4f} V<br/>  MA: {moving_avg:.4f} V"
+                    # Show psi for PTs 1–3 when calibration is loaded (larger font)
+                    if connector_id in self.pt_calibration:
+                        a, b, c, d = self.pt_calibration[connector_id]
+                        psi = calculate_pressure(moving_avg, a, b, c, d)
+                        text += f"<br/><span style='font-size: 16pt; font-weight: bold'>{psi:.2f} psi</span>"
+                    self.connector_labels[connector_id].setText(text)
                 else:
                     self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
             else:

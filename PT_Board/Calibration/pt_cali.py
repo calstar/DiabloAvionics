@@ -103,7 +103,7 @@ X = []
 Y = {}  # Modified to store pressure readings per gauge
 
 # Modified read_udp function to receive DAQv2-Comms packets over UDP
-def read_udp(port=5007, bind_address="0.0.0.0"):
+def read_udp(port=5006, bind_address="0.0.0.0"):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Try to enable SO_REUSEPORT for multiple listeners (Linux/macOS)
@@ -130,10 +130,11 @@ def read_udp(port=5007, bind_address="0.0.0.0"):
                     if result:
                         header, chunks = result
                         # Extract voltages and map connector -> instrument
-                        # sensor_id 0..9 = connector 1..10; instrument_to_connector maps cal instrument to connector
+                        # Stream_ADC: sensor_id = connector (1-10). PT_BOARD_Multi: sensor_id = 0-9 (connector - 1).
                         for chunk in chunks:
                             for dp in chunk["datapoints"]:
-                                connector = int(dp["sensor_id"]) + 1  # 1-10
+                                sid = int(dp["sensor_id"])
+                                connector = sid if 1 <= sid <= 10 else (sid + 1)  # 1-10
                                 try:
                                     inst_idx = instrument_to_connector.index(connector)
                                     if inst_idx < len(instrument_deques):
@@ -401,7 +402,7 @@ if __name__ == "__main__":
         writer.writerow(header)
 
     # Start UDP reading thread
-    udp_thread = threading.Thread(target=read_udp, args=(5007, "0.0.0.0"))
+    udp_thread = threading.Thread(target=read_udp, args=(5006, "0.0.0.0"))
     udp_thread.daemon = True
     udp_thread.start()
 
@@ -445,7 +446,7 @@ if __name__ == "__main__":
     if show_live_feed == 'y':
         stop_serial_thread.clear()
         pause_reading.clear()
-        udp_thread = threading.Thread(target=read_udp, args=(5007, "0.0.0.0"))
+        udp_thread = threading.Thread(target=read_udp, args=(5006, "0.0.0.0"))
         udp_thread.daemon = True
         udp_thread.start()
 
