@@ -204,11 +204,9 @@ void read_data(int count) {
       continue;
     }
 
-    // Send raw ADC code instead of voltage
-    // Reinterpret the int32_t code as uint32_t for the packet
-    uint32_t code_as_uint32;
-    memcpy(&code_as_uint32, &reading.value, sizeof(int32_t));
-    chunk.add_datapoint(sensorId, code_as_uint32);
+    // Send raw ADC code (int32_t cast to uint32_t)
+    // The GUI will reinterpret this back to signed for voltage conversion
+    chunk.add_datapoint(sensorId, static_cast<uint32_t>(reading.value));
   }
 
   // Add the chunk to our collection

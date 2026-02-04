@@ -49,7 +49,7 @@ SENSOR_DATA_CHUNK_FORMAT = '<I'  # 4 bytes
 SENSOR_DATA_CHUNK_SIZE = 4
 
 # SensorDatapoint: sensor_id (uint8_t), data (float - sent as uint32_t but interpreted as float)
-SENSOR_DATAPOINT_FORMAT = '<Bf'  # 5 bytes (1 byte sensor_id + 4 bytes float)
+SENSOR_DATAPOINT_FORMAT = '<BI'  # 5 bytes: uint8_t sensor_id + uint32_t data
 SENSOR_DATAPOINT_SIZE = 5
 
 # Plotting constants
@@ -533,10 +533,10 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             
             for dp in chunk['datapoints']:
                 sensor_id = dp['sensor_id']
-                code_uint32 = dp['data']  # Received as uint32_t (reinterpreted from int32_t)
+                code_uint32 = dp['data']  # Received as uint32_t from protocol
                 
                 # Convert code to voltage
-                voltage = self.code_to_voltage(int(code_uint32))
+                voltage = self.code_to_voltage(code_uint32)
                 
                 # Initialize sensor data storage if needed (for sensors outside 1-10 range)
                 if sensor_id not in self.sensor_data:

@@ -79,7 +79,7 @@ SENSOR_DATA_PACKET_SIZE = 2
 SENSOR_DATA_CHUNK_FORMAT = '<I'  # 4 bytes: timestamp
 SENSOR_DATA_CHUNK_SIZE = 4
 
-SENSOR_DATAPOINT_FORMAT = '<Bf'  # 5 bytes: sensor_id (1), data (4 bytes float)
+SENSOR_DATAPOINT_FORMAT = '<BI'  # 5 bytes: uint8_t sensor_id + uint32_t data
 SENSOR_DATAPOINT_SIZE = 5
 
 # Update interval for current display
@@ -457,11 +457,23 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         if chunks:
             latest_chunk = chunks[-1]
             for dp in latest_chunk['datapoints']:
-                sensor_id = dp['sensor_id']  # 0-indexed (0-9)
-                voltage = dp['data']  # Voltage in Volts (float)
+                sensor_id = dp['sensor_id']  # 1-indexed (1-10)
+                code_uint32 = dp['data']  # Received as uint32_t from protocol
                 
-                if 0 <= sensor_id < NUM_ACTUATORS:
-                    self.voltage_readings[sensor_id] = voltage
+                # Convert code to voltage (using default settings: 32-bit, 2.5V reference)
+                # Reinterpret uint32_t as int32_t (signed)
+                if code_uint32 >= 0x80000000:
+                    code_int32 = code_uint32 - 0x100000000
+                else:
+                    code_int32 = code_uint32
+                
+                # Convert to voltage (32-bit ADC, 2.5V reference)
+                voltage = (code_int32 * 2.5) / 2147483648.0
+                
+                # Convert to 0-indexed for array
+                array_idx = sensor_id - 1
+                if 0 <= array_idx < NUM_ACTUATORS:
+                    self.voltage_readings[array_idx] = voltage
     
     def update_button_highlight(self, array_idx: int, actuator_state: int):
         """
