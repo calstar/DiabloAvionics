@@ -18,7 +18,7 @@ SENSOR_DATA_PACKET_FORMAT = "<BB"
 SENSOR_DATA_PACKET_SIZE = 2
 SENSOR_DATA_CHUNK_FORMAT = "<I"
 SENSOR_DATA_CHUNK_SIZE = 4
-SENSOR_DATAPOINT_FORMAT = "<Bf"
+SENSOR_DATAPOINT_FORMAT = "<BI"  # uint8_t sensor_id + uint32_t data (ADC code)
 SENSOR_DATAPOINT_SIZE = 5
 
 def parse_packet_header(data):
@@ -69,9 +69,9 @@ def ema(data, alpha=0.5):
         ema_filtered = alpha * d + (1 - alpha) * ema_filtered
     return ema_filtered
 
-# Use polynomial coefficients to calculate pressure
-def calculate_pressure_from_polynomial(voltage, poly_coeffs):
-    return np.polyval(poly_coeffs, voltage)
+# Use polynomial coefficients to calculate pressure from ADC code
+def calculate_pressure_from_polynomial(adc_code, poly_coeffs):
+    return np.polyval(poly_coeffs, adc_code)
 
 # Moving Average Filter (with Standard Deviation-based Outlier Removal)
 def filtered_sensor_data(data, window=5, std_threshold=2):
@@ -90,7 +90,7 @@ def apply_dual_filter(data, ema_alpha=0.1, ma_window=250, std_threshold=0.001):
 
 # Global variables
 instrument_deques = []
-filtered_voltage_deques = []
+filtered_code_deques = []
 pressure_deques = []
 calibration_polynomials = []
 instrument_to_connector = []  # Filled at startup: instrument_to_connector[i] = board connector (1-10) for PT i+1
@@ -129,35 +129,37 @@ def read_udp(port=5006, bind_address="0.0.0.0"):
                     result = parse_sensor_data_packet(data)
                     if result:
                         header, chunks = result
-                        # Extract voltages and map connector -> instrument
+                        # Extract ADC codes and map connector -> instrument
                         # Stream_ADC: sensor_id = connector (1-10). PT_BOARD_Multi: sensor_id = 0-9 (connector - 1).
                         for chunk in chunks:
                             for dp in chunk["datapoints"]:
                                 sid = int(dp["sensor_id"])
                                 connector = sid if 1 <= sid <= 10 else (sid + 1)  # 1-10
+                                adc_code = int(dp["data"])  # Get ADC code as uint32
+                                
                                 try:
                                     inst_idx = instrument_to_connector.index(connector)
                                     if inst_idx < len(instrument_deques):
-                                        instrument_deques[inst_idx].append(float(dp["data"]))
+                                        instrument_deques[inst_idx].append(adc_code)
                                 except ValueError:
                                     pass
                         
-                        # Process filtered voltages and pressures
-                        filtered_voltages = []
+                        # Process filtered ADC codes and pressures
+                        filtered_codes = []
                         pressure_readings = []
                         for j in range(len(instrument_deques)):
                             if len(instrument_deques[j]) > 0:
-                                filtered_voltage = apply_dual_filter(list(instrument_deques[j]))
-                                filtered_voltage_deques[j].append(filtered_voltage)
-                                filtered_voltages.append(filtered_voltage)
+                                filtered_code = apply_dual_filter(list(instrument_deques[j]))
+                                filtered_code_deques[j].append(filtered_code)
+                                filtered_codes.append(filtered_code)
                                 
-                                calculated_pressure = calculate_pressure_from_polynomial(filtered_voltage, calibration_polynomials[j])
+                                calculated_pressure = calculate_pressure_from_polynomial(filtered_code, calibration_polynomials[j])
                                 pressure_deques[j].append(calculated_pressure)
                                 filtered_pressure = apply_dual_filter(list(pressure_deques[j]))
                                 pressure_readings.append(filtered_pressure)
 
-                        voltage_output = " | ".join([f"PT {j+1}: {voltage:.3f} V" for j, voltage in enumerate(filtered_voltages)])
-                        print("Filtered voltage readings:", voltage_output)
+                        code_output = " | ".join([f"PT {j+1}: {code:.0f}" for j, code in enumerate(filtered_codes)])
+                        print("Filtered ADC code readings:", code_output)
 
                         pressure_output = " | ".join([f"PT {j+1}: {pressure:.3f} psi" for j, pressure in enumerate(pressure_readings)])
                         print("Calculated pressures:", pressure_output)
@@ -200,7 +202,7 @@ def interrupt():
             Y[gauge_num] = []
         Y[gauge_num].append(pressure)
 
-    # Update voltage readings for each PT
+    # Update ADC code readings for each PT
     for pt_num in range(len(instrument_deques)):
         if pt_num >= len(X):
             X.append([])
@@ -236,9 +238,9 @@ def save_calibration_data():
         row = []
         for pt_num in range(len(instrument_deques)):
             gauge_num = gauge_mappings[pt_num + 1]
-            # Add voltage, pressure, and coefficients for this PT
+            # Add ADC code, pressure, and coefficients for this PT
             row.extend([
-                X[pt_num][-1],  # Voltage
+                X[pt_num][-1],  # ADC Code
                 Y[gauge_num][-1]  # Pressure
             ])
             row.extend(calibration_polynomials[pt_num])  # Coefficients
@@ -267,7 +269,7 @@ def plot_data_with_trendline():
         axs[row, col].plot(x, trendline_y, color='blue', linestyle='--', label=f'Trendline (R² = {r_squared:.3f})')
 
         axs[row, col].set_title(f"PT {pt_num + 1} (Gauge {gauge_num})")
-        axs[row, col].set_xlabel('Voltage')
+        axs[row, col].set_xlabel('ADC Code')
         axs[row, col].set_ylabel('Pressure (psi)')
         axs[row, col].legend()
 
@@ -372,7 +374,7 @@ if __name__ == "__main__":
     # Initialize data structures
     instrument_deques = [deque(maxlen=data_point_num) for _ in range(instrument_count)]
     calibration_polynomials = [[0] * (poly_order + 1) for _ in range(instrument_count)]
-    filtered_voltage_deques = [deque(maxlen=data_point_num) for _ in range(instrument_count)]
+    filtered_code_deques = [deque(maxlen=data_point_num) for _ in range(instrument_count)]
     pressure_deques = [deque(maxlen=data_point_num) for _ in range(instrument_count)]
     X = [[] for _ in range(instrument_count)]
     Y = {i: [] for i in range(1, gauge_count + 1)}
@@ -394,7 +396,7 @@ if __name__ == "__main__":
         header = []
         for pt_num in range(instrument_count):
             pt_header = [
-                f"PT{pt_num + 1} Voltage",
+                f"PT{pt_num + 1} ADC Code",
                 f"PT{pt_num + 1} Pressure"
             ]
             pt_header.extend([f"PT{pt_num + 1} Coefficient {k}" for k in range(poly_order + 1)])

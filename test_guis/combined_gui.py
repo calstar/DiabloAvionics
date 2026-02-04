@@ -22,8 +22,8 @@ from collections import deque
 
 # PT calibration CSV (relative to this file); used to show psi for PT connectors present in CSV
 PT_CALIBRATION_CSV = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "PT_Board", "Calibration", "PT Calibration Attempt 2026-02-03_test5.csv"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # Go up to project root
+    "PT_Board", "Calibration", "PT Calibration Attempt 2026-02-04_test2.csv"
 )
 
 # Fix Qt "cocoa" platform plugin on macOS when Homebrew Qt plugins path lacks platforms/
@@ -97,6 +97,7 @@ UPDATE_INTERVAL_MS = 50  # Update plots every 50ms
 NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
 NUM_ACTUATORS = 10
 ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
+SENSOR_LABELS_FILE = Path(__file__).parent / "sensor_labels.json"
 
 # Colors for sensors (cycle through if more than this)
 SENSOR_COLORS = [
@@ -116,16 +117,16 @@ pg.setConfigOptions(antialias=False)
 
 
 # ---------------------- PT pressure from calibration ----------------------
-def calculate_pressure(raw_value: float, PT_A: float, PT_B: float, PT_C: float, PT_D: float) -> float:
-    """Compute pressure (psi) from raw voltage using cubic polynomial (matches C++ calculatePressure)."""
-    return (PT_A * (raw_value ** 3)) + (PT_B * (raw_value ** 2)) + (PT_C * raw_value) + PT_D
+def calculate_pressure(adc_code: float, PT_A: float, PT_B: float, PT_C: float, PT_D: float) -> float:
+    """Compute pressure (psi) from ADC code using cubic polynomial."""
+    return (PT_A * (adc_code ** 3)) + (PT_B * (adc_code ** 2)) + (PT_C * adc_code) + PT_D
 
 
 def load_pt_calibration(csv_path: str) -> Dict[int, Tuple[float, float, float, float]]:
     """
     Load PT calibration coefficients from CSV.
     Returns dict: connector_id -> (PT_A, PT_B, PT_C, PT_D) for each PT present in the CSV.
-    CSV columns per PT: Voltage, Pressure, Coefficient 0 (A), 1 (B), 2 (C), 3 (D).
+    CSV columns per PT: ADC Code, Pressure, Coefficient 0 (A), 1 (B), 2 (C), 3 (D).
     Uses the last data row as the calibration coefficients.
     Works with any number of PTs; PT numbers are discovered from column names "PT{N} Coefficient 0".
     """
@@ -396,8 +397,15 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # IP filter for sensor data (default to sensor board IP)
         self.filter_source_ip = DEFAULT_SENSOR_IP  # Only accept data from this IP
         
+        # Y-axis settings
+        self.y_axis_auto_scale = True  # Auto-scale Y-axis by default
+        self.y_axis_min = 0.0  # Minimum Y-axis value (psi)
+        self.y_axis_max = 200.0  # Maximum Y-axis value (psi)
+        
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
-        self.sensor_data: Dict[int, deque] = {}
+        self.sensor_data: Dict[int, deque] = {}  # Voltage data for statistics display
+        self.sensor_adc_codes: Dict[int, deque] = {}  # Store ADC codes for pressure calculation
+        self.sensor_psi_data: Dict[int, deque] = {}  # PSI data for plotting (calibrated sensors only)
         self.sensor_plots: Dict[int, pg.PlotDataItem] = {}
         self.plot_enabled: Dict[int, bool] = {i: True for i in range(1, NUM_CONNECTORS + 1)}
         
@@ -406,6 +414,9 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         
         # PT calibration for connectors 1–3 (connector_id -> (PT_A, PT_B, PT_C, PT_D))
         self.pt_calibration = load_pt_calibration(PT_CALIBRATION_CSV)
+        
+        # Sensor labels (connector_id -> label string)
+        self.sensor_labels = self.load_sensor_labels()
         
         self.init_ui()
         
@@ -423,6 +434,60 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.stats_timer = QtCore.QTimer()
         self.stats_timer.timeout.connect(self.update_statistics)
         self.stats_timer.start(500)  # Update stats every 500ms
+    
+    def load_sensor_labels(self) -> Dict[int, str]:
+        """Load sensor labels from JSON file"""
+        if SENSOR_LABELS_FILE.exists():
+            try:
+                with open(SENSOR_LABELS_FILE, 'r') as f:
+                    labels = json.load(f)
+                    # Convert string keys to int and ensure all connectors have labels
+                    result = {}
+                    for i in range(NUM_CONNECTORS):
+                        connector_id = i + 1
+                        key = str(connector_id)
+                        result[connector_id] = labels.get(key, "")
+                    return result
+            except Exception as e:
+                print(f"Error loading sensor labels: {e}")
+        return {i + 1: "" for i in range(NUM_CONNECTORS)}
+    
+    def save_sensor_labels(self):
+        """Save sensor labels to JSON file"""
+        try:
+            labels_dict = {str(k): v for k, v in self.sensor_labels.items()}
+            with open(SENSOR_LABELS_FILE, 'w') as f:
+                json.dump(labels_dict, f, indent=2)
+        except Exception as e:
+            print(f"Error saving sensor labels: {e}")
+    
+    def on_sensor_label_changed(self, connector_id: int, text: str):
+        """Handle sensor label text change"""
+        self.sensor_labels[connector_id] = text
+        self.save_sensor_labels()
+        # Update the plot legend if this sensor has a plot
+        if connector_id in self.sensor_plots:
+            self.update_plot_legend(connector_id)
+    
+    def update_plot_legend(self, connector_id: int):
+        """Update the legend for a specific sensor plot"""
+        if connector_id not in self.sensor_plots:
+            return
+        
+        plot = self.sensor_plots[connector_id]
+        label = self.sensor_labels.get(connector_id, "")
+        if label:
+            new_name = f"PT {connector_id}: {label} (psi)"
+        else:
+            new_name = f"PT {connector_id} (psi)"
+        
+        # Update legend by finding and modifying the legend item
+        if self.legend:
+            for item in self.legend.items:
+                if len(item) >= 2 and item[0] == plot:
+                    label_item = item[1]
+                    label_item.setText(new_name)
+                    break
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -443,6 +508,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         top_panel.addWidget(self.status_label)
         
         top_panel.addStretch()
+        
+        # Y-axis auto-scale toggle
+        self.auto_scale_checkbox = QtWidgets.QCheckBox("Auto-scale Y-axis")
+        self.auto_scale_checkbox.setChecked(self.y_axis_auto_scale)
+        self.auto_scale_checkbox.stateChanged.connect(self.on_auto_scale_toggled)
+        self.auto_scale_checkbox.setStyleSheet("padding: 5px;")
+        top_panel.addWidget(self.auto_scale_checkbox)
         
         # Settings button
         settings_btn = QtWidgets.QPushButton("Settings")
@@ -535,10 +607,25 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # Create labels and plot toggles for each connector
         self.connector_labels = {}
         self.connector_toggles: Dict[int, QtWidgets.QCheckBox] = {}
+        self.sensor_label_inputs: Dict[int, QtWidgets.QLineEdit] = {}
         small_font = QtGui.QFont()
         small_font.setPointSize(9)
+        tiny_font = QtGui.QFont()
+        tiny_font.setPointSize(8)
         
         for i in range(1, NUM_CONNECTORS + 1):
+            # Add label input field (only visible for calibrated sensors)
+            if i in self.pt_calibration:
+                label_input = QtWidgets.QLineEdit()
+                label_input.setPlaceholderText(f"PT {i} label...")
+                label_input.setText(self.sensor_labels.get(i, ""))
+                label_input.setFont(tiny_font)
+                label_input.setStyleSheet("padding: 2px; margin-bottom: 2px;")
+                label_input.textChanged.connect(lambda text, cid=i: self.on_sensor_label_changed(cid, text))
+                connector_stats_layout.addWidget(label_input)
+                self.sensor_label_inputs[i] = label_input
+            
+            # Data display row
             row = QtWidgets.QHBoxLayout()
             cb = QtWidgets.QCheckBox()
             cb.setChecked(True)
@@ -554,6 +641,10 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             row.addWidget(label)
             connector_stats_layout.addLayout(row)
             self.connector_labels[i] = label
+            
+            # Add spacing between sensors
+            if i < NUM_CONNECTORS:
+                connector_stats_layout.addSpacing(5)
         
         connector_stats_layout.addStretch()  # Push connectors to top
         connector_scroll.setWidget(connector_stats_content)
@@ -567,13 +658,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         layout.addLayout(plot_stats_layout, 1)
         
         # Create initial plot
-        self.plot_item = self.plot_widget.addPlot(title="Sensor Data Over Time (Sensors 1-10)")
+        self.plot_item = self.plot_widget.addPlot(title="Pressure Data Over Time (Calibrated Sensors)")
         
         # Set title color and size to white for visibility on black background
-        self.plot_item.setTitle("Sensor Data Over Time (Sensors 1-10)", color='w', size='14pt')
+        self.plot_item.setTitle("Pressure Data Over Time (Calibrated Sensors)", color='w', size='14pt')
         
         # Set axis labels to white
-        self.plot_item.setLabel('left', 'Voltage (V)', color='w')
+        self.plot_item.setLabel('left', 'Pressure (psi)', color='w')
         self.plot_item.setLabel('bottom', 'Time (seconds)', color='w')
         
         self.plot_item.addLegend()
@@ -620,10 +711,18 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         """Pre-initialize plots for all 10 connectors"""
         for connector_id in range(1, NUM_CONNECTORS + 1):
             self.sensor_data[connector_id] = deque(maxlen=MAX_POINTS)
-            self.add_sensor_plot(connector_id)
+            self.sensor_adc_codes[connector_id] = deque(maxlen=MAX_POINTS)
+            # Only initialize PSI data and plots for calibrated sensors
+            if connector_id in self.pt_calibration:
+                self.sensor_psi_data[connector_id] = deque(maxlen=MAX_POINTS)
+                self.add_sensor_plot(connector_id)
     
     def _on_plot_toggle(self, connector_id: int, state):
         self.plot_enabled[connector_id] = bool(state)
+    
+    def on_auto_scale_toggled(self, state):
+        """Handle auto-scale Y-axis toggle"""
+        self.y_axis_auto_scale = bool(state)
     
     def on_graph_moving_avg_changed(self, value):
         """Handle graph moving average window size change"""
@@ -682,20 +781,38 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                 # Initialize sensor data storage if needed (for sensors outside 1-10 range)
                 if sensor_id not in self.sensor_data:
                     self.sensor_data[sensor_id] = deque(maxlen=MAX_POINTS)
-                    self.add_sensor_plot(sensor_id)
+                    self.sensor_adc_codes[sensor_id] = deque(maxlen=MAX_POINTS)
+                    # Only create PSI storage and plot for calibrated sensors
+                    if sensor_id in self.pt_calibration:
+                        self.sensor_psi_data[sensor_id] = deque(maxlen=MAX_POINTS)
+                        self.add_sensor_plot(sensor_id)
                 
                 # Add data point (use relative time from start)
                 self.sensor_data[sensor_id].append((relative_time, voltage))
+                self.sensor_adc_codes[sensor_id].append((relative_time, code_uint32))
+                
+                # Calculate and store PSI if calibration exists
+                if sensor_id in self.pt_calibration:
+                    a, b, c, d = self.pt_calibration[sensor_id]
+                    psi = calculate_pressure(code_uint32, a, b, c, d)
+                    self.sensor_psi_data[sensor_id].append((relative_time, psi))
     
     def add_sensor_plot(self, sensor_id: int):
-        """Add a new sensor plot"""
+        """Add a new sensor plot (for calibrated sensors only)"""
         if sensor_id not in self.plot_enabled:
             self.plot_enabled[sensor_id] = True
         color_idx = sensor_id % len(SENSOR_COLORS)
         color = SENSOR_COLORS[color_idx]
         
+        # Get label for this sensor
+        label = self.sensor_labels.get(sensor_id, "")
+        if label:
+            plot_name = f"PT {sensor_id}: {label} (psi)"
+        else:
+            plot_name = f"PT {sensor_id} (psi)"
+        
         pen = pg.mkPen(color=color, width=2)
-        plot = self.plot_item.plot([], [], pen=pen, name=f"Sensor {sensor_id}")
+        plot = self.plot_item.plot([], [], pen=pen, name=plot_name)
         
         # Update legend text color to white for this new item
         if self.legend:
@@ -709,57 +826,65 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.sensor_plots[sensor_id] = plot
     
     def update_plots(self):
-        """Update all sensor plots"""
-        if not self.sensor_data:
+        """Update all sensor plots (PSI data for calibrated sensors only)"""
+        if not self.sensor_psi_data:
             return
         
         current_time = time.time() - self.stats_start_time
         time_window = self.window_seconds
         
-        for sensor_id, data_deque in self.sensor_data.items():
+        # Only plot calibrated sensors that have PSI data
+        for sensor_id, psi_deque in self.sensor_psi_data.items():
             if sensor_id not in self.sensor_plots:
                 continue
             enabled = self.plot_enabled.get(sensor_id, True)
             self.sensor_plots[sensor_id].setVisible(enabled)
             if not enabled:
                 continue
-            if len(data_deque) == 0:
+            if len(psi_deque) == 0:
                 continue
             
-            # Extract time and value arrays
+            # Extract time and PSI value arrays
             times = []
-            values = []
+            psi_values = []
             
-            for t, v in data_deque:
+            for t, psi in psi_deque:
                 # Only show data within the time window
                 if current_time - t <= time_window:
                     times.append(t)
-                    values.append(v)
+                    psi_values.append(psi)
             
             if len(times) > 0:
                 # Convert to numpy arrays
                 times_array = np.array(times)
-                values_array = np.array(values)
+                psi_array = np.array(psi_values)
                 
                 # Apply moving average smoothing to graph if window > 1
-                if self.graph_moving_avg_samples > 1 and len(values_array) >= self.graph_moving_avg_samples:
+                if self.graph_moving_avg_samples > 1 and len(psi_array) >= self.graph_moving_avg_samples:
                     # Use convolution for efficient moving average
                     kernel = np.ones(self.graph_moving_avg_samples) / self.graph_moving_avg_samples
-                    smoothed_values = np.convolve(values_array, kernel, mode='valid')
+                    smoothed_psi = np.convolve(psi_array, kernel, mode='valid')
                     # Adjust times array to match smoothed data length
                     smoothed_times = times_array[self.graph_moving_avg_samples - 1:]
                     
                     # Update plot with smoothed data
-                    self.sensor_plots[sensor_id].setData(smoothed_times, smoothed_values)
+                    self.sensor_plots[sensor_id].setData(smoothed_times, smoothed_psi)
                 else:
                     # Update plot with raw data
-                    self.sensor_plots[sensor_id].setData(times_array, values_array)
+                    self.sensor_plots[sensor_id].setData(times_array, psi_array)
         
         # Update x-axis range
         if current_time > time_window:
             self.plot_item.setXRange(current_time - time_window, current_time, padding=0)
         else:
             self.plot_item.setXRange(0, time_window, padding=0)
+        
+        # Update y-axis range based on auto-scale setting
+        if self.y_axis_auto_scale:
+            self.plot_item.enableAutoRange(axis='y')
+        else:
+            self.plot_item.setYRange(self.y_axis_min, self.y_axis_max, padding=0)
+            self.plot_item.disableAutoRange(axis='y')
     
     def update_statistics(self):
         """Update statistics display"""
@@ -804,11 +929,17 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                     moving_avg = sum(values[-n_samples:]) / n_samples
                     
                     text = f"C{connector_id}: {current:.4f} V<br/>  MA: {moving_avg:.4f} V"
-                    # Show psi for PTs 1–3 when calibration is loaded (larger font)
+                    # Show psi for PTs when calibration is loaded (larger font)
                     if connector_id in self.pt_calibration:
-                        a, b, c, d = self.pt_calibration[connector_id]
-                        psi = calculate_pressure(moving_avg, a, b, c, d)
-                        text += f"<br/><span style='font-size: 16pt; font-weight: bold'>{psi:.2f} psi</span>"
+                        # Get ADC code values for pressure calculation
+                        if connector_id in self.sensor_adc_codes and len(self.sensor_adc_codes[connector_id]) > 0:
+                            adc_values = [code for t, code in self.sensor_adc_codes[connector_id]]
+                            n_samples_adc = min(self.display_moving_avg_samples, len(adc_values))
+                            moving_avg_adc = sum(adc_values[-n_samples_adc:]) / n_samples_adc
+                            
+                            a, b, c, d = self.pt_calibration[connector_id]
+                            psi = calculate_pressure(moving_avg_adc, a, b, c, d)
+                            text += f"<br/><span style='font-size: 16pt; font-weight: bold'>{psi:.2f} psi</span>"
                     self.connector_labels[connector_id].setText(text)
                 else:
                     self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
@@ -823,6 +954,13 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             self.adc_bits = dialog.adc_bits
             self.reference_voltage = dialog.reference_voltage
             self.filter_source_ip = dialog.filter_source_ip
+            self.y_axis_min = dialog.y_axis_min
+            self.y_axis_max = dialog.y_axis_max
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        self.save_sensor_labels()
+        event.accept()
 
 
 # ---------------------- Actuator Control Window ----------------------
@@ -1173,6 +1311,8 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         self.adc_bits = parent.adc_bits
         self.reference_voltage = parent.reference_voltage
         self.filter_source_ip = parent.filter_source_ip
+        self.y_axis_min = parent.y_axis_min
+        self.y_axis_max = parent.y_axis_max
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -1227,6 +1367,33 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         ip_group.setLayout(ip_layout)
         layout.addWidget(ip_group)
         
+        # Y-axis Settings group
+        yaxis_group = QtWidgets.QGroupBox("Y-Axis Range (when not auto-scaling)")
+        yaxis_layout = QtWidgets.QVBoxLayout()
+        
+        # Y-axis minimum
+        yaxis_layout.addWidget(QtWidgets.QLabel("Y-Axis Minimum (psi):"))
+        self.y_min_spinbox = QtWidgets.QDoubleSpinBox()
+        self.y_min_spinbox.setRange(-1000.0, 10000.0)
+        self.y_min_spinbox.setSingleStep(10.0)
+        self.y_min_spinbox.setDecimals(1)
+        self.y_min_spinbox.setValue(self.y_axis_min)
+        self.y_min_spinbox.setSuffix(" psi")
+        yaxis_layout.addWidget(self.y_min_spinbox)
+        
+        # Y-axis maximum
+        yaxis_layout.addWidget(QtWidgets.QLabel("Y-Axis Maximum (psi):"))
+        self.y_max_spinbox = QtWidgets.QDoubleSpinBox()
+        self.y_max_spinbox.setRange(-1000.0, 10000.0)
+        self.y_max_spinbox.setSingleStep(10.0)
+        self.y_max_spinbox.setDecimals(1)
+        self.y_max_spinbox.setValue(self.y_axis_max)
+        self.y_max_spinbox.setSuffix(" psi")
+        yaxis_layout.addWidget(self.y_max_spinbox)
+        
+        yaxis_group.setLayout(yaxis_layout)
+        layout.addWidget(yaxis_group)
+        
         # Close button
         btn = QtWidgets.QPushButton("Close")
         btn.clicked.connect(self.accept)
@@ -1241,6 +1408,8 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         self.adc_bits = self.adc_bits_spinbox.value()
         self.reference_voltage = self.ref_voltage_spinbox.value()
         self.filter_source_ip = self.source_ip_edit.text().strip()
+        self.y_axis_min = self.y_min_spinbox.value()
+        self.y_axis_max = self.y_max_spinbox.value()
         super().accept()
 
 
