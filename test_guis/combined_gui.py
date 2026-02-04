@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Combined Sensor & Actuator Control GUI
-Opens two separate windows:
-1. Sensor Data Receiver - Real-time plotting of sensor data
-2. Actuator Control - Control actuators and monitor voltage
+Opens one full-screen window with:
+- Left (66%): Sensor/PT data receiver and real-time plotting
+- Right (33%): Actuator control and voltage monitoring
 
 Requirements: pip install pyqt6 pyqtgraph numpy
 """
@@ -113,6 +113,105 @@ SENSOR_COLORS = [
     (255, 255, 80),   # Yellow
 ]
 
+
+
+CONFIG_FILE = Path(__file__).parent / "config.json"
+
+class ConfigManager:
+    """Manages loading and saving of application configuration."""
+    def __init__(self):
+        self.config = {
+            "actuators": {str(i): "" for i in range(1, NUM_ACTUATORS + 1)},
+            "sensors": {str(i): "" for i in range(1, NUM_CONNECTORS + 1)},
+            "network": {
+                "actuator_ip": DEFAULT_ACTUATOR_IP,
+                "actuator_port": DEFAULT_DEVICE_PORT,
+                "sensor_ip_filter": DEFAULT_SENSOR_IP,
+                "receive_port": DEFAULT_RECEIVE_PORT
+            },
+            "display": {
+                "adc_bits": 32,
+                "ref_voltage": 2.5,
+                "window_seconds": DEFAULT_WINDOW_SECONDS,
+                "y_axis_min": 0.0,
+                "y_axis_max": 200.0,
+                "y_axis_autoscale": True
+            },
+            "mappings": {
+                "GN2": 0,
+                "ETH": 0,
+                "LOX": 0
+            }
+        }
+        self.load()
+
+    def load(self):
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    loaded = json.load(f)
+                    # Recursive update to preserve defaults for missing keys
+                    self._update_dict(self.config, loaded)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+        else:
+            # Config doesn't exist, try to migrate legacy labels
+            print("Config file not found. checking for legacy label files...")
+            self._migrate_legacy_labels()
+            # Save the new config immediately
+            self.save()
+
+    def _migrate_legacy_labels(self):
+        # Migrate Actuator Labels
+        if ACTUATOR_LABELS_FILE.exists():
+            try:
+                with open(ACTUATOR_LABELS_FILE, 'r') as f:
+                    labels = json.load(f)
+                    for k, v in labels.items():
+                        if k in self.config["actuators"]:
+                            self.config["actuators"][k] = v
+                print(f"Migrated actuator labels from {ACTUATOR_LABELS_FILE}")
+            except Exception as e:
+                print(f"Error migrating actuator labels: {e}")
+
+        # Migrate Sensor Labels
+        if SENSOR_LABELS_FILE.exists():
+            try:
+                with open(SENSOR_LABELS_FILE, 'r') as f:
+                    labels = json.load(f)
+                    for k, v in labels.items():
+                        # Support both "1" and "PT1" style keys just in case, though file implies IDs
+                        # The legacy code keys were strings of ints "1", "2"
+                        if k in self.config["sensors"]:
+                            self.config["sensors"][k] = v
+                print(f"Migrated sensor labels from {SENSOR_LABELS_FILE}")
+            except Exception as e:
+                print(f"Error migrating sensor labels: {e}")
+
+    def save(self):
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            print(f"Saved config to {CONFIG_FILE}")
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def _update_dict(self, target, source):
+        for k, v in source.items():
+            if isinstance(v, dict) and k in target and isinstance(target[k], dict):
+                self._update_dict(target[k], v)
+            else:
+                target[k] = v
+
+    # Helpers
+    def get_actuator_label(self, idx): return self.config["actuators"].get(str(idx), "")
+    def set_actuator_label(self, idx, txt): self.config["actuators"][str(idx)] = txt; self.save()
+    
+    def get_sensor_label(self, idx): return self.config["sensors"].get(str(idx), "")
+    def set_sensor_label(self, idx, txt): self.config["sensors"][str(idx)] = txt; self.save()
+
+CONFIG = ConfigManager()
+
 pg.setConfigOptions(antialias=False)
 
 
@@ -157,6 +256,10 @@ def load_pt_calibration(csv_path: str) -> Dict[int, Tuple[float, float, float, f
         return result
     except Exception:
         return result
+
+
+# Demo mode: fake UDP packets from separate module
+from demo_sensor_sender import build_demo_packet
 
 
 # ---------------------- Protocol Functions ----------------------
@@ -380,10 +483,11 @@ class UDPReceiver(QtCore.QThread):
         self.status_update.emit("Stopped")
 
 
-# ---------------------- Sensor Plot Window ----------------------
-class SensorPlotWindow(QtWidgets.QMainWindow):
-    def __init__(self, receiver, bind_address: str = '0.0.0.0'):
-        super().__init__()
+# ---------------------- Sensor Plot Widget (reusable panel) ----------------------
+class SensorPlotWidget(QtWidgets.QWidget):
+    """Reusable sensor/PT plotting panel. Used in SensorPlotWindow and CombinedMainWindow."""
+    def __init__(self, receiver, bind_address: str = '0.0.0.0', parent=None):
+        super().__init__(parent)
         self.receiver = receiver
         self.bind_address = bind_address
         self.window_seconds = DEFAULT_WINDOW_SECONDS
@@ -412,11 +516,26 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # Statistics
         self.stats_start_time = time.time()
         
-        # PT calibration for connectors 1–3 (connector_id -> (PT_A, PT_B, PT_C, PT_D))
         self.pt_calibration = load_pt_calibration(PT_CALIBRATION_CSV)
         
         # Sensor labels (connector_id -> label string)
-        self.sensor_labels = self.load_sensor_labels()
+        self.sensor_labels = {i: CONFIG.get_sensor_label(i) for i in range(1, NUM_CONNECTORS + 1)}
+        
+        # Load display settings from Config
+        disp = CONFIG.config["display"]
+        self.window_seconds = disp["window_seconds"]
+        self.adc_bits = disp["adc_bits"]
+        self.reference_voltage = disp["ref_voltage"]
+        self.y_axis_min = disp["y_axis_min"]
+        self.y_axis_max = disp["y_axis_max"]
+        self.y_axis_auto_scale = disp["y_axis_autoscale"]
+        self.filter_source_ip = CONFIG.config["network"]["sensor_ip_filter"]
+        
+        # Demo mode: synthetic PT data via UDP to localhost (same decode path as real hardware)
+        self.demo_mode = False
+        self.demo_start_time: Optional[float] = None
+        self.demo_send_socket: Optional[socket.socket] = None
+        self.demo_send_timer: Optional[QtCore.QTimer] = None
         
         self.init_ui()
         
@@ -426,45 +545,24 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.receiver.packet_received.connect(self.on_packet_received)
         
         # Timer for updating plots and statistics
-        self.update_timer = QtCore.QTimer()
+        self.update_timer = QtCore.QTimer(self)
         self.update_timer.timeout.connect(self.update_plots)
         self.update_timer.start(UPDATE_INTERVAL_MS)
         
         # Timer for updating statistics display
-        self.stats_timer = QtCore.QTimer()
+        self.stats_timer = QtCore.QTimer(self)
         self.stats_timer.timeout.connect(self.update_statistics)
         self.stats_timer.start(500)  # Update stats every 500ms
     
-    def load_sensor_labels(self) -> Dict[int, str]:
-        """Load sensor labels from JSON file"""
-        if SENSOR_LABELS_FILE.exists():
-            try:
-                with open(SENSOR_LABELS_FILE, 'r') as f:
-                    labels = json.load(f)
-                    # Convert string keys to int and ensure all connectors have labels
-                    result = {}
-                    for i in range(NUM_CONNECTORS):
-                        connector_id = i + 1
-                        key = str(connector_id)
-                        result[connector_id] = labels.get(key, "")
-                    return result
-            except Exception as e:
-                print(f"Error loading sensor labels: {e}")
-        return {i + 1: "" for i in range(NUM_CONNECTORS)}
-    
-    def save_sensor_labels(self):
-        """Save sensor labels to JSON file"""
-        try:
-            labels_dict = {str(k): v for k, v in self.sensor_labels.items()}
-            with open(SENSOR_LABELS_FILE, 'w') as f:
-                json.dump(labels_dict, f, indent=2)
-        except Exception as e:
-            print(f"Error saving sensor labels: {e}")
-    
     def on_sensor_label_changed(self, connector_id: int, text: str):
         """Handle sensor label text change"""
-        self.sensor_labels[connector_id] = text
-        self.save_sensor_labels()
+        CONFIG.set_sensor_label(connector_id, text)
+        self.sensor_labels[connector_id] = text  # Update local cache
+        
+        # Update dashoard label widget if it exists
+        if connector_id in self.sensor_label_inputs:
+             self.sensor_label_inputs[connector_id].setText(text)
+             
         # Update the plot legend if this sensor has a plot
         if connector_id in self.sensor_plots:
             self.update_plot_legend(connector_id)
@@ -491,13 +589,8 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle(f"Sensor Data Receiver - Port {self.receiver.port}")
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # Central widget
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
         # Top panel with controls
         top_panel = QtWidgets.QHBoxLayout()
@@ -505,6 +598,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # Connection info
         self.status_label = QtWidgets.QLabel("Starting...")
         self.status_label.setStyleSheet("font-weight: bold; padding: 5px;")
+        self.status_label.setFixedWidth(400)  # Fixed width to prevent layout resize on text change
         top_panel.addWidget(self.status_label)
         
         top_panel.addStretch()
@@ -515,11 +609,6 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         self.auto_scale_checkbox.stateChanged.connect(self.on_auto_scale_toggled)
         self.auto_scale_checkbox.setStyleSheet("padding: 5px;")
         top_panel.addWidget(self.auto_scale_checkbox)
-        
-        # Settings button
-        settings_btn = QtWidgets.QPushButton("Settings")
-        settings_btn.clicked.connect(self.show_settings)
-        top_panel.addWidget(settings_btn)
         
         layout.addLayout(top_panel)
         
@@ -607,7 +696,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # Create labels and plot toggles for each connector
         self.connector_labels = {}
         self.connector_toggles: Dict[int, QtWidgets.QCheckBox] = {}
-        self.sensor_label_inputs: Dict[int, QtWidgets.QLineEdit] = {}
+        self.sensor_label_inputs: Dict[int, QtWidgets.QLabel] = {}
         small_font = QtGui.QFont()
         small_font.setPointSize(9)
         tiny_font = QtGui.QFont()
@@ -616,12 +705,12 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         for i in range(1, NUM_CONNECTORS + 1):
             # Add label input field (only visible for calibrated sensors)
             if i in self.pt_calibration:
-                label_input = QtWidgets.QLineEdit()
-                label_input.setPlaceholderText(f"PT {i} label...")
+                # Replaced editable QLineEdit with read-only QLabel as requested
+                label_input = QtWidgets.QLabel()
                 label_input.setText(self.sensor_labels.get(i, ""))
                 label_input.setFont(tiny_font)
-                label_input.setStyleSheet("padding: 2px; margin-bottom: 2px;")
-                label_input.textChanged.connect(lambda text, cid=i: self.on_sensor_label_changed(cid, text))
+                label_input.setStyleSheet("padding: 2px; margin-bottom: 2px; color: #AAAAAA;")
+                
                 connector_stats_layout.addWidget(label_input)
                 self.sensor_label_inputs[i] = label_input
             
@@ -720,9 +809,63 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
     def _on_plot_toggle(self, connector_id: int, state):
         self.plot_enabled[connector_id] = bool(state)
     
+    
     def on_auto_scale_toggled(self, state):
         """Handle auto-scale Y-axis toggle"""
         self.y_axis_auto_scale = bool(state)
+        CONFIG.config["display"]["y_axis_autoscale"] = self.y_axis_auto_scale
+        CONFIG.save()
+        # Update settings checkbox if it exists
+        if hasattr(self, 'settings_widget_ref') and self.settings_widget_ref:
+             # This is a bit circular, but we can emit a signal or just let the settings
+             # tab refresh next time it is shown.
+             pass
+    
+    def _clear_all_sensor_deques(self):
+        """Clear all sensor data deques so plot/stats show only new data."""
+        for k in list(self.sensor_data.keys()):
+            self.sensor_data[k] = deque(maxlen=MAX_POINTS)
+            self.sensor_adc_codes[k] = deque(maxlen=MAX_POINTS)
+            if k in self.sensor_psi_data:
+                self.sensor_psi_data[k] = deque(maxlen=MAX_POINTS)
+    
+    def on_demo_mode_toggled(self, state):
+        """Handle Demo mode checkbox: toggle demo_mode, start/stop UDP sender, clear deques.
+        
+        Uses QTimer.singleShot to defer state changes to avoid Wayland buffer size mismatch
+        crashes when the window is maximized (xdg_surface buffer error).
+        """
+        # Defer the actual state change to avoid Wayland crash when maximized
+        QtCore.QTimer.singleShot(0, lambda: self._apply_demo_mode(bool(state)))
+    
+    def _apply_demo_mode(self, enabled: bool):
+        """Apply demo mode state change (called via QTimer to avoid Wayland crashes)."""
+        self.demo_mode = enabled
+        if self.demo_mode:
+            self.demo_start_time = time.time()
+            self._clear_all_sensor_deques()
+            self.status_label.setText("Demo mode – synthetic data (UDP)")
+            try:
+                self.demo_send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.demo_send_timer = QtCore.QTimer(self)
+                self.demo_send_timer.timeout.connect(self._send_demo_packet)
+                self.demo_send_timer.start(UPDATE_INTERVAL_MS)
+            except OSError:
+                self.demo_send_socket = None
+                self.demo_send_timer = None
+        else:
+            self.demo_start_time = None
+            if self.demo_send_timer is not None:
+                self.demo_send_timer.stop()
+                self.demo_send_timer = None
+            if self.demo_send_socket is not None:
+                try:
+                    self.demo_send_socket.close()
+                except OSError:
+                    pass
+                self.demo_send_socket = None
+            self._clear_all_sensor_deques()
+            self.status_label.setText("Listening")
     
     def on_graph_moving_avg_changed(self, value):
         """Handle graph moving average window size change"""
@@ -752,7 +895,8 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
     
     def on_status_update(self, message: str):
         """Handle status updates from receiver thread"""
-        self.status_label.setText(message)
+        if not self.demo_mode:
+            self.status_label.setText(message)
     
     def on_packet_received(self, packet_size: int, packet_type: int):
         """Handle packet received notification"""
@@ -760,9 +904,12 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
     
     def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
         """Handle received sensor data"""
-        # Filter by source IP - only accept data from configured sensor board
-        if source_ip != self.filter_source_ip:
-            return  # Ignore data from other sources
+        if self.demo_mode:
+            if source_ip != "127.0.0.1":
+                return  # In demo mode only accept packets from local demo sender
+        else:
+            if source_ip != self.filter_source_ip:
+                return  # Ignore data from other sources
         
         current_time = time.time()
         
@@ -796,6 +943,26 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
                     a, b, c, d = self.pt_calibration[sensor_id]
                     psi = calculate_pressure(code_uint32, a, b, c, d)
                     self.sensor_psi_data[sensor_id].append((relative_time, psi))
+    
+    def _send_demo_packet(self):
+        """Build and send one demo UDP packet to localhost (called by demo timer)."""
+        if not self.demo_mode or self.demo_start_time is None or not self.pt_calibration:
+            return
+        packet = build_demo_packet(
+            self.pt_calibration,
+            self.demo_start_time,
+            self.stats_start_time,
+            packet_type=PacketType.SENSOR_DATA,
+            version=DIABLO_COMMS_VERSION,
+            max_packet_size=MAX_PACKET_SIZE,
+        )
+        if packet and self.demo_send_socket is not None:
+            try:
+                self.demo_send_socket.sendto(
+                    packet, ("127.0.0.1", self.receiver.port)
+                )
+            except OSError:
+                pass
     
     def add_sensor_plot(self, sensor_id: int):
         """Add a new sensor plot (for calibrated sensors only)"""
@@ -946,30 +1113,35 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             else:
                 self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
     
-    def show_settings(self):
-        """Show settings dialog"""
-        dialog = SensorSettingsDialog(self)
-        if dialog.exec():
-            self.window_seconds = dialog.window_seconds
-            self.adc_bits = dialog.adc_bits
-            self.reference_voltage = dialog.reference_voltage
-            self.filter_source_ip = dialog.filter_source_ip
-            self.y_axis_min = dialog.y_axis_min
-            self.y_axis_max = dialog.y_axis_max
+
+
+
+# ---------------------- Sensor Plot Window (standalone) ----------------------
+class SensorPlotWindow(QtWidgets.QMainWindow):
+    """Standalone window that embeds SensorPlotWidget."""
+    def __init__(self, receiver, bind_address: str = '0.0.0.0'):
+        super().__init__()
+        self.setWindowTitle(f"Sensor Data Receiver - Port {receiver.port}")
+        self.setGeometry(100, 100, 1200, 800)
+        self.setCentralWidget(SensorPlotWidget(receiver, bind_address, self))
     
     def closeEvent(self, event):
         """Handle window close event"""
-        self.save_sensor_labels()
+        w = self.centralWidget()
+        if w and hasattr(w, 'save_sensor_labels'):
+            w.save_sensor_labels()
         event.accept()
 
 
-# ---------------------- Actuator Control Window ----------------------
-class ActuatorControlWindow(QtWidgets.QMainWindow):
-    def __init__(self, receiver, device_ip: str = DEFAULT_ACTUATOR_IP, device_port: int = DEFAULT_DEVICE_PORT):
-        super().__init__()
+# ---------------------- Actuator Control Widget (reusable panel) ----------------------
+class ActuatorControlWidget(QtWidgets.QWidget):
+    """Reusable actuator control panel. Used in ActuatorControlWindow and CombinedMainWindow."""
+    def __init__(self, receiver, device_ip: str = None, device_port: int = None, parent=None):
+        super().__init__(parent)
         self.receiver = receiver
-        self.device_ip = device_ip
-        self.device_port = device_port
+        # Load from CONFIG (ignoring args if None, effectively preferring config)
+        self.device_ip = CONFIG.config["network"]["actuator_ip"]
+        self.device_port = CONFIG.config["network"]["actuator_port"]
         
         # Actuator state tracking (1-indexed: 1-10)
         # 0 = OFF, 1 = ON
@@ -980,7 +1152,7 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         self.voltage_readings = [0.0] * NUM_ACTUATORS
         
         # Actuator labels (1-indexed: 1-10)
-        self.actuator_labels = self.load_labels()
+        self.actuator_labels = {i: CONFIG.get_actuator_label(i) for i in range(1, NUM_ACTUATORS + 1)}
         
         # UDP socket for sending commands
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -992,52 +1164,26 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         self.receiver.status_update.connect(self.on_status_update)
         
         # Timer for updating current display
-        self.update_timer = QtCore.QTimer()
+        self.update_timer = QtCore.QTimer(self)
         self.update_timer.timeout.connect(self.update_current_display)
         self.update_timer.start(100)  # Update every 100ms
     
-    def load_labels(self) -> Dict[int, str]:
-        """Load actuator labels from JSON file"""
-        if ACTUATOR_LABELS_FILE.exists():
-            try:
-                with open(ACTUATOR_LABELS_FILE, 'r') as f:
-                    labels = json.load(f)
-                    # Convert string keys to int and ensure all actuators have labels
-                    result = {}
-                    for i in range(NUM_ACTUATORS):
-                        actuator_id = i + 1
-                        key = str(actuator_id)
-                        result[actuator_id] = labels.get(key, "")
-                    return result
-            except Exception as e:
-                print(f"Error loading labels: {e}")
-        return {i + 1: "" for i in range(NUM_ACTUATORS)}
+
     
-    def save_labels(self):
-        """Save actuator labels to JSON file"""
-        try:
-            labels_dict = {str(k): v for k, v in self.actuator_labels.items()}
-            with open(ACTUATOR_LABELS_FILE, 'w') as f:
-                json.dump(labels_dict, f, indent=2)
-        except Exception as e:
-            print(f"Error saving labels: {e}")
+        self.command_sock = None
     
     def on_label_changed(self, actuator_id: int, text: str):
-        """Handle label text change"""
+        """Handle label text change (internal or external)"""
+        CONFIG.set_actuator_label(actuator_id, text)
         self.actuator_labels[actuator_id] = text
-        self.save_labels()
+        self.update_label_display(actuator_id, text)
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle(f"Actuator Control - {self.device_ip}:{self.device_port}")
-        self.setGeometry(1350, 100, 1000, 500)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # Central widget
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
-        
-        # Top panel with status and settings
+        # Top panel with status
         top_panel = QtWidgets.QHBoxLayout()
         
         self.status_label = QtWidgets.QLabel("Ready")
@@ -1046,26 +1192,21 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         
         top_panel.addStretch()
         
-        # Settings button
-        settings_btn = QtWidgets.QPushButton("Settings")
-        settings_btn.clicked.connect(self.show_settings)
-        top_panel.addWidget(settings_btn)
-        
         layout.addLayout(top_panel)
         
-        # Main content area with actuators in a grid
+        # Main content area with actuators in a grid: 2 columns x 5 rows
         grid_container = QtWidgets.QWidget()
         grid_layout = QtWidgets.QGridLayout(grid_container)
         grid_layout.setSpacing(10)
         
-        # Create actuator controls in a 5x2 grid
+        # Create actuator controls in a 2x5 grid
         self.actuator_widgets = []
         for i in range(NUM_ACTUATORS):
             actuator_id = i + 1  # 1-indexed
             
-            # Calculate grid position: 5 columns, 2 rows
-            row = i // 5  # 0 or 1
-            col = i % 5   # 0-4
+            # Calculate grid position: 2 columns, 5 rows
+            row = i // 2  # 0-4
+            col = i % 2   # 0 or 1
             
             # Create widget for each actuator
             actuator_frame = QtWidgets.QFrame()
@@ -1076,18 +1217,12 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
             actuator_layout = QtWidgets.QVBoxLayout(actuator_frame)
             
             # Actuator ID label
-            id_label = QtWidgets.QLabel(f"Actuator {actuator_id}")
+            # If label exists, show label. Else show "Actuator {id}"
+            label_text = self.actuator_labels.get(actuator_id, "") or f"Actuator {actuator_id}"
+            id_label = QtWidgets.QLabel(label_text)
             id_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             id_label.setStyleSheet("font-weight: bold; font-size: 12pt; padding: 5px;")
             actuator_layout.addWidget(id_label)
-            
-            # Label input field
-            label_edit = QtWidgets.QLineEdit()
-            label_edit.setPlaceholderText("Label...")
-            label_edit.setText(self.actuator_labels.get(actuator_id, ""))
-            label_edit.setStyleSheet("font-size: 9pt; padding: 2px;")
-            label_edit.textChanged.connect(lambda text, aid=actuator_id: self.on_label_changed(aid, text))
-            actuator_layout.addWidget(label_edit)
             
             # Button container
             button_container = QtWidgets.QHBoxLayout()
@@ -1145,7 +1280,7 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 'on_btn': on_btn,
                 'off_btn': off_btn,
                 'voltage_label': voltage_label,
-                'label_edit': label_edit
+                'id_label': id_label
             })
         
         layout.addWidget(grid_container, 1)
@@ -1153,48 +1288,45 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         # Initialize all actuators to OFF state (highlight OFF buttons)
         for i in range(NUM_ACTUATORS):
             self.update_button_highlight(i, 0)
+
+    def update_label_display(self, actuator_id, text):
+        """External method to update label display when changed in settings"""
+        idx = actuator_id - 1
+        if 0 <= idx < len(self.actuator_widgets):
+             new_text = text or f"Actuator {actuator_id}"
+             self.actuator_widgets[idx]['id_label'].setText(new_text)
+
+    def on_label_changed(self, actuator_id: int, text: str):
+        """Handle label text change (internal or external)"""
+        CONFIG.set_actuator_label(actuator_id, text)
+        self.actuator_labels[actuator_id] = text
+        self.update_label_display(actuator_id, text)
     
     def on_status_update(self, message: str):
         """Handle status updates from receiver thread"""
-        # Only update if it's relevant to actuator control
         pass
     
     def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
         """Handle received sensor data (voltage readings)"""
-        # Actuator board accepts data from any source (no filtering for now)
-        # Could add filtering here if needed in the future
-        
-        # Process the latest chunk
         if chunks:
             latest_chunk = chunks[-1]
             for dp in latest_chunk['datapoints']:
                 sensor_id = dp['sensor_id']  # 1-indexed (1-10)
                 code_uint32 = dp['data']  # Received as uint32_t from protocol
                 
-                # Convert code to voltage (using default settings: 32-bit, 2.5V reference)
-                # Reinterpret uint32_t as int32_t (signed)
                 if code_uint32 >= 0x80000000:
                     code_int32 = code_uint32 - 0x100000000
                 else:
                     code_int32 = code_uint32
                 
-                # Convert to voltage (32-bit ADC, 2.5V reference)
                 voltage = (code_int32 * 2.5) / 2147483648.0
-                
-                # Convert to 0-indexed for array
                 array_idx = sensor_id - 1
                 if 0 <= array_idx < NUM_ACTUATORS:
                     self.voltage_readings[array_idx] = voltage
     
     def update_button_highlight(self, array_idx: int, actuator_state: int):
-        """
-        Update button highlighting based on actuator state.
-        array_idx: 0-9 (0-indexed)
-        actuator_state: 0 = OFF, 1 = ON
-        """
+        """Update button highlighting based on actuator state."""
         widget = self.actuator_widgets[array_idx]
-        
-        # Inactive button style (matches background)
         bg_color = widget['frame'].palette().color(QtGui.QPalette.ColorRole.Window).name()
         inactive_style = f"""
             QPushButton {{
@@ -1207,8 +1339,6 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 padding: 5px;
             }}
         """
-        
-        # Active button style (white background, black text)
         active_style = """
             QPushButton {
                 font-size: 11pt;
@@ -1220,8 +1350,6 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 padding: 5px;
             }
         """
-        
-        # Highlight ON button if state is ON, otherwise highlight OFF button
         if actuator_state == 1:
             widget['on_btn'].setStyleSheet(active_style)
             widget['off_btn'].setStyleSheet(inactive_style)
@@ -1230,33 +1358,17 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
             widget['off_btn'].setStyleSheet(active_style)
     
     def set_actuator_state(self, actuator_id: int, actuator_state: int):
-        """
-        Set actuator state and send command packet.
-        actuator_id: 1-10 (1-indexed)
-        actuator_state: 0 = OFF, 1 = ON
-        """
-        # Convert to 0-indexed for array
+        """Set actuator state and send command packet."""
         array_idx = actuator_id - 1
-        
-        # Update local state
         self.actuator_states[array_idx] = actuator_state
-        
-        # Update UI - highlight the active button
         self.update_button_highlight(array_idx, actuator_state)
-        
-        # Send command packet
         self.send_actuator_command(actuator_id, actuator_state)
     
     def send_actuator_command(self, actuator_id: int, actuator_state: int):
-        """
-        Send an actuator command packet to the device.
-        actuator_id: 1-10 (1-indexed)
-        actuator_state: 0 = OFF, non-zero = ON
-        """
+        """Send an actuator command packet to the device."""
         try:
             commands = [(actuator_id, actuator_state)]
             packet = create_actuator_command_packet(commands)
-            
             if len(packet) > 0:
                 self.command_sock.sendto(packet, (self.device_ip, self.device_port))
                 print(f"Sent command: Actuator {actuator_id} -> {'ON' if actuator_state else 'OFF'}")
@@ -1264,9 +1376,9 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
                 print(f"Error: Failed to create packet for actuator {actuator_id}")
         except OSError as e:
             err = e.errno
-            if err == 65:  # EHOSTUNREACH on macOS
+            if err == 65:
                 msg = f"No route to host — check device IP ({self.device_ip})"
-            elif err == 64:  # ENETUNREACH
+            elif err == 64:
                 msg = f"Network unreachable — check WiFi/Ethernet"
             else:
                 msg = f"Network error: [{err}] {e}"
@@ -1283,172 +1395,551 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
             widget = self.actuator_widgets[i]
             widget['voltage_label'].setText(f"Voltage: {voltage:.3f} V")
     
-    def show_settings(self):
-        """Show settings dialog"""
-        dialog = ActuatorSettingsDialog(self)
-        if dialog.exec():
-            self.device_ip = dialog.device_ip
-            self.device_port = dialog.device_port
-            self.setWindowTitle(f"Actuator Control - {self.device_ip}:{self.device_port}")
+
+
+
+# ---------------------- Top Bar Widgets ----------------------
+class PressureBarWidget(QtWidgets.QWidget):
+    """
+    Vertical bar gauge showing pressure relative to NOP and MEOP.
+    Range: 0 to 1.2 * MEOP
+    """
+    def __init__(self, title: str, nop: float = 500.0, meop: float = 700.0, fixed_color: QtGui.QColor = None, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.nop = nop
+        self.meop = meop
+        self.fixed_color = fixed_color
+        self.current_value = 0.0
+        self.setMinimumWidth(60)
+        self.setMinimumHeight(100)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+        
+    def set_value(self, value: float):
+        self.current_value = value
+        self.update()  # Trigger repaint
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        
+        # Geometry
+        w = self.width()
+        h = self.height()
+        
+        # Margins (room for text)
+        top_margin = 20
+        bottom_margin = 20
+        bar_w = w - 20
+        bar_x = 10
+        bar_h = h - top_margin - bottom_margin
+        bar_y = top_margin
+        
+        # Draw Title
+        painter.setPen(QtCore.Qt.GlobalColor.white)
+        painter.drawText(QtCore.QRect(0, 0, w, top_margin), QtCore.Qt.AlignmentFlag.AlignCenter, self.title)
+        
+        # Draw Background Bar
+        painter.setPen(QtCore.Qt.GlobalColor.gray)
+        painter.setBrush(QtGui.QColor(50, 50, 50))
+        painter.drawRect(bar_x, bar_y, bar_w, bar_h)
+        
+        # Scale calculation
+        max_val = 1.2 * self.meop
+        if max_val <= 0: max_val = 1.0
+        
+        # Draw Current Level
+        fill_ratio = min(max(self.current_value / max_val, 0.0), 1.0)
+        fill_h = int(fill_ratio * bar_h)
+        fill_y = bar_y + bar_h - fill_h
+        
+        # Color based on value
+        if self.fixed_color:
+            painter.setBrush(self.fixed_color)
+        else:
+            if self.current_value > self.meop:
+                painter.setBrush(QtGui.QColor(255, 0, 0)) # Red
+            elif self.current_value > self.nop:
+                painter.setBrush(QtGui.QColor(255, 165, 0)) # Orange
+            else:
+                painter.setBrush(QtGui.QColor(0, 255, 0)) # Green
+            
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRect(bar_x, fill_y, bar_w, fill_h)
+        
+        # Draw Lines for NOP and MEOP
+        painter.setPen(QtGui.QPen(QtCore.Qt.GlobalColor.white, 1, QtCore.Qt.PenStyle.DotLine))
+        
+        # NOP Line
+        nop_ratio = self.nop / max_val
+        nop_y = bar_y + bar_h - int(nop_ratio * bar_h)
+        if 0 <= nop_ratio <= 1:
+            painter.drawLine(bar_x, nop_y, bar_x + bar_w, nop_y)
+            
+        # MEOP Line
+        meop_ratio = self.meop / max_val
+        meop_y = bar_y + bar_h - int(meop_ratio * bar_h)
+        if 0 <= meop_ratio <= 1:
+            painter.drawLine(bar_x, meop_y, bar_x + bar_w, meop_y)
+
+        # Draw Value Text
+        painter.setPen(QtCore.Qt.GlobalColor.white)
+        val_str = f"{self.current_value:.0f}"
+        painter.drawText(QtCore.QRect(0, h - bottom_margin, w, bottom_margin), QtCore.Qt.AlignmentFlag.AlignCenter, val_str)
+
+
+class TopBarWidget(QtWidgets.QWidget):
+    navigation_requested = QtCore.pyqtSignal(str)  # "dashboard" or "settings"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(120)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        
+        # Pressure Bars
+        # Colors: GN2=Green, ETH=Red, LOX=Blue
+        self.bar_gn2 = PressureBarWidget("GN2", fixed_color=QtGui.QColor(0, 255, 0))
+        self.bar_eth = PressureBarWidget("ETH", fixed_color=QtGui.QColor(255, 0, 0))
+        self.bar_lox = PressureBarWidget("LOX", fixed_color=QtGui.QColor(0, 0, 255))
+        
+        layout.addWidget(self.bar_gn2)
+        layout.addWidget(self.bar_eth)
+        layout.addWidget(self.bar_lox)
+        
+        layout.addStretch()
+        
+        # Buttons Layout
+        btn_layout = QtWidgets.QVBoxLayout()
+        
+        # Abort Buttons Row
+        abort_row = QtWidgets.QHBoxLayout()
+        self.btn_abort = QtWidgets.QPushButton("ABORT")
+        self.btn_abort.setMinimumSize(120, 40)
+        self.btn_abort.setStyleSheet("background-color: orange; font-weight: bold; color: black;")
+        self.btn_abort.clicked.connect(self.abort)
+        
+        self.btn_emergency = QtWidgets.QPushButton("EMERGENCY ABORT")
+        self.btn_emergency.setMinimumSize(120, 40)
+        self.btn_emergency.setStyleSheet("background-color: red; font-weight: bold; color: white;")
+        self.btn_emergency.clicked.connect(self.abort)
+        
+        abort_row.addWidget(self.btn_abort)
+        abort_row.addWidget(self.btn_emergency)
+        btn_layout.addLayout(abort_row)
+        
+        # Navigation Button
+        self.nav_btn = QtWidgets.QPushButton("SETTINGS")
+        self.nav_btn.setMinimumHeight(30)
+        self.nav_btn.clicked.connect(self.toggle_view)
+        btn_layout.addWidget(self.nav_btn)
+        
+        layout.addLayout(btn_layout)
+        
+    def abort(self):
+        """Placeholder for abort functionality."""
+        print("ABORT TRIGGERED")
+
+    def toggle_view(self):
+        text = self.nav_btn.text()
+        if text == "SETTINGS":
+            self.navigation_requested.emit("settings")
+            self.nav_btn.setText("DASHBOARD")
+        else:
+            self.navigation_requested.emit("dashboard")
+            self.nav_btn.setText("SETTINGS")
+
+
+# ---------------------- Settings Widget ----------------------
+class SettingsWidget(QtWidgets.QWidget):
+    """
+    Centralized settings configuration widget.
+    """
+    mapping_changed = QtCore.pyqtSignal(str, int)  # gauge_name (GN2/ETH/LOX), pt_id
+    
+    def __init__(self, sensor_widget, actuator_widget, parent=None):
+        super().__init__(parent)
+        self.sensor_widget = sensor_widget
+        self.actuator_widget = actuator_widget
+        
+        # Default mappings
+        self.gauge_mappings = {
+            "GN2": 0,
+            "ETH": 0,
+            "LOX": 0
+        }
+        
+        self.init_ui()
+        self.load_values()
+
+    def init_ui(self):
+        main_layout = QtWidgets.QHBoxLayout(self)
+        
+        # Left Column: Sensor & General Settings
+        left_col = QtWidgets.QVBoxLayout()
+        
+        # ... Sensor Settings ...
+        sensor_group = QtWidgets.QGroupBox("Sensor & General View Settings")
+        sensor_layout = QtWidgets.QFormLayout()
+        
+        self.demo_chk = QtWidgets.QCheckBox("Demo Mode")
+        self.demo_chk.toggled.connect(self.sensor_widget.on_demo_mode_toggled)
+        sensor_layout.addRow(self.demo_chk)
+        
+        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.time_slider.setRange(1, 60)
+        self.time_lbl = QtWidgets.QLabel("10s")
+        self.time_slider.valueChanged.connect(self.on_time_changed)
+        sensor_layout.addRow("Time Window:", self.time_slider)
+        sensor_layout.addRow("", self.time_lbl)
+        
+        self.y_min_spin = QtWidgets.QDoubleSpinBox()
+        self.y_min_spin.setRange(-1000, 10000)
+        self.y_min_spin.valueChanged.connect(self.on_y_min_changed)
+        sensor_layout.addRow("Y Min:", self.y_min_spin)
+        
+        self.y_max_spin = QtWidgets.QDoubleSpinBox()
+        self.y_max_spin.setRange(-1000, 10000)
+        self.y_max_spin.valueChanged.connect(self.on_y_max_changed)
+        sensor_layout.addRow("Y Max:", self.y_max_spin)
+
+        self.ip_filter = QtWidgets.QLineEdit()
+        self.ip_filter.textChanged.connect(self.on_ip_filter_changed)
+        sensor_layout.addRow("Sensor IP Filter:", self.ip_filter)
+        
+        sensor_group.setLayout(sensor_layout)
+        left_col.addWidget(sensor_group)
+        
+        # ADC Settings
+        adc_group = QtWidgets.QGroupBox("ADC Configuration")
+        adc_layout = QtWidgets.QFormLayout()
+        self.adc_bits_spin = QtWidgets.QSpinBox()
+        self.adc_bits_spin.setRange(8, 32)
+        self.adc_bits_spin.valueChanged.connect(self.on_adc_bits_changed)
+        adc_layout.addRow("ADC Bits:", self.adc_bits_spin)
+        
+        self.ref_volt_spin = QtWidgets.QDoubleSpinBox()
+        self.ref_volt_spin.setRange(0.1, 10.0)
+        self.ref_volt_spin.setValue(2.5)
+        self.ref_volt_spin.valueChanged.connect(self.on_ref_volt_changed)
+        adc_layout.addRow("Ref Voltage (V):", self.ref_volt_spin)
+        adc_group.setLayout(adc_layout)
+        left_col.addWidget(adc_group)
+        
+        left_col.addStretch()
+        main_layout.addLayout(left_col, 1)
+        
+        # Middle Column: Actuator Configuration
+        mid_col = QtWidgets.QVBoxLayout()
+        act_group = QtWidgets.QGroupBox("Actuator Configuration")
+        act_layout = QtWidgets.QVBoxLayout()
+        
+        form = QtWidgets.QFormLayout()
+        self.act_ip = QtWidgets.QLineEdit()
+        self.act_ip.textChanged.connect(self.on_act_ip_changed)
+        form.addRow("Device IP:", self.act_ip)
+        
+        self.act_port = QtWidgets.QSpinBox()
+        self.act_port.setRange(1, 65535)
+        self.act_port.valueChanged.connect(self.on_act_port_changed)
+        form.addRow("Device Port:", self.act_port)
+        act_layout.addLayout(form)
+        
+        act_layout.addWidget(QtWidgets.QLabel("Actuator Names:"))
+        self.act_scroll = QtWidgets.QScrollArea()
+        self.act_scroll_widget = QtWidgets.QWidget()
+        self.act_form = QtWidgets.QFormLayout(self.act_scroll_widget)
+        self.act_inputs = {}
+        for i in range(1, NUM_ACTUATORS + 1):
+            le = QtWidgets.QLineEdit()
+            le.textChanged.connect(lambda txt, idx=i: self.on_actuator_name_changed(idx, txt))
+            self.act_form.addRow(f"Actuator {i}:", le)
+            self.act_inputs[i] = le
+        self.act_scroll.setWidget(self.act_scroll_widget)
+        self.act_scroll.setWidgetResizable(True)
+        act_layout.addWidget(self.act_scroll)
+        
+        act_group.setLayout(act_layout)
+        mid_col.addWidget(act_group)
+        main_layout.addLayout(mid_col, 1)
+        
+        # Right Column: PT Configuration & Gauge Mapping
+        right_col = QtWidgets.QVBoxLayout()
+        pt_group = QtWidgets.QGroupBox("Pressure Transducers (PT) & Mapping")
+        pt_layout = QtWidgets.QVBoxLayout()
+        
+        # Gauge Mapping (Moved to top as requested)
+        mapping_group = QtWidgets.QGroupBox("Top Bar Gauge Mapping")
+        mapping_form = QtWidgets.QFormLayout()
+        
+        self.combo_gn2 = QtWidgets.QComboBox()
+        self.combo_eth = QtWidgets.QComboBox()
+        self.combo_lox = QtWidgets.QComboBox()
+        
+        self.combos = {
+            "GN2": self.combo_gn2,
+            "ETH": self.combo_eth,
+            "LOX": self.combo_lox
+        }
+        
+        for name, combo in self.combos.items():
+            combo.addItem("None", 0)
+            for pt_id in sorted(self.sensor_widget.pt_calibration.keys()):
+                combo.addItem(f"PT {pt_id}", pt_id)
+            # Reverted to currentIndexChanged now that we block signals in load_values
+            combo.currentIndexChanged.connect(lambda idx, n=name, c=combo: self.on_mapping_changed(n, c))
+            mapping_form.addRow(f"{name} Source:", combo)
+            
+        mapping_group.setLayout(mapping_form)
+        pt_layout.addWidget(mapping_group)
+        
+        # PT Names List
+        pt_layout.addWidget(QtWidgets.QLabel("PT Names (Calibrated):"))
+        self.pt_scroll = QtWidgets.QScrollArea()
+        self.pt_scroll_widget = QtWidgets.QWidget()
+        self.pt_form = QtWidgets.QFormLayout(self.pt_scroll_widget)
+        self.pt_inputs = {}
+        
+        # Populate PT inputs based on calibration
+        for pt_id in sorted(self.sensor_widget.pt_calibration.keys()):
+            le = QtWidgets.QLineEdit()
+            le.textChanged.connect(lambda txt, idx=pt_id: self.on_pt_name_changed(idx, txt))
+            self.pt_form.addRow(f"PT {pt_id}:", le)
+            self.pt_inputs[pt_id] = le
+            
+        self.pt_scroll.setWidget(self.pt_scroll_widget)
+        self.pt_scroll.setWidgetResizable(True)
+        pt_layout.addWidget(self.pt_scroll)
+        
+        pt_group.setLayout(pt_layout)
+        right_col.addWidget(pt_group)
+        main_layout.addLayout(right_col, 1)
+
+    def load_values(self):
+        # Sensor
+        with QtCore.QSignalBlocker(self.demo_chk):
+            self.demo_chk.setChecked(self.sensor_widget.demo_mode)
+        
+        with QtCore.QSignalBlocker(self.time_slider):
+            self.time_slider.setValue(int(self.sensor_widget.window_seconds))
+            
+        with QtCore.QSignalBlocker(self.y_min_spin):
+            self.y_min_spin.setValue(self.sensor_widget.y_axis_min)
+            
+        with QtCore.QSignalBlocker(self.y_max_spin):
+            self.y_max_spin.setValue(self.sensor_widget.y_axis_max)
+            
+        with QtCore.QSignalBlocker(self.ip_filter):
+            self.ip_filter.setText(self.sensor_widget.filter_source_ip)
+            
+        with QtCore.QSignalBlocker(self.adc_bits_spin):
+            self.adc_bits_spin.setValue(self.sensor_widget.adc_bits)
+            
+        with QtCore.QSignalBlocker(self.ref_volt_spin):
+            self.ref_volt_spin.setValue(self.sensor_widget.reference_voltage)
+        
+        # Actuator
+        with QtCore.QSignalBlocker(self.act_ip):
+            self.act_ip.setText(self.actuator_widget.device_ip)
+            
+        with QtCore.QSignalBlocker(self.act_port):
+            self.act_port.setValue(self.actuator_widget.device_port)
+            
+        for i, le in self.act_inputs.items():
+            with QtCore.QSignalBlocker(le):
+                le.setText(self.actuator_widget.actuator_labels.get(i, ""))
+            
+        # PT
+        for i, le in self.pt_inputs.items():
+            with QtCore.QSignalBlocker(le):
+                le.setText(self.sensor_widget.sensor_labels.get(i, ""))
+        
+        # Mappings
+        for name, combo in self.combos.items():
+            pt_id = CONFIG.config["mappings"].get(name, 0)
+            idx = combo.findData(pt_id)
+            if idx >= 0:
+                with QtCore.QSignalBlocker(combo):
+                    combo.setCurrentIndex(idx)
+            
+    def on_time_changed(self, val):
+        self.time_lbl.setText(f"{val}s")
+        self.sensor_widget.window_seconds = float(val)
+        CONFIG.config["display"]["window_seconds"] = float(val)
+        CONFIG.save()
+
+    def on_y_min_changed(self, val):
+        self.sensor_widget.y_axis_min = val
+        CONFIG.config["display"]["y_axis_min"] = val
+        CONFIG.save()
+
+    def on_y_max_changed(self, val):
+        self.sensor_widget.y_axis_max = val
+        CONFIG.config["display"]["y_axis_max"] = val
+        CONFIG.save()
+
+    def on_ip_filter_changed(self, text):
+        self.sensor_widget.filter_source_ip = text
+        CONFIG.config["network"]["sensor_ip_filter"] = text
+        CONFIG.save()
+
+    def on_adc_bits_changed(self, val):
+        self.sensor_widget.adc_bits = val
+        CONFIG.config["display"]["adc_bits"] = val
+        CONFIG.save()
+
+    def on_ref_volt_changed(self, val):
+        self.sensor_widget.reference_voltage = val
+        CONFIG.config["display"]["ref_voltage"] = val
+        CONFIG.save()
+
+    def on_act_ip_changed(self, text):
+        self.actuator_widget.device_ip = text
+        CONFIG.config["network"]["actuator_ip"] = text
+        CONFIG.save()
+
+    def on_act_port_changed(self, val):
+        self.actuator_widget.device_port = val
+        CONFIG.config["network"]["actuator_port"] = val
+        CONFIG.save()
+
+    def on_actuator_name_changed(self, actuator_id, text):
+        self.actuator_widget.on_label_changed(actuator_id, text)
+        
+    def on_pt_name_changed(self, pt_id, text):
+        self.sensor_widget.on_sensor_label_changed(pt_id, text)
+        self.update_combo_text(pt_id, text)
+        
+    def update_combo_text(self, pt_id, label):
+        # Update ComboBox user-visible text if needed (optional polish)
+        pass
+
+    def on_mapping_changed(self, gauge_name, combo):
+        pt_id = combo.currentData()
+        self.mapping_changed.emit(gauge_name, pt_id)
+        CONFIG.config["mappings"][gauge_name] = pt_id
+        CONFIG.save()
+
+
+# ---------------------- Actuator Control Window (standalone) ----------------------
+class ActuatorControlWindow(QtWidgets.QMainWindow):
+    """Standalone window that embeds ActuatorControlWidget."""
+    def __init__(self, receiver, device_ip: str = DEFAULT_ACTUATOR_IP, device_port: int = DEFAULT_DEVICE_PORT):
+        super().__init__()
+        self.setWindowTitle(f"Actuator Control - {device_ip}:{device_port}")
+        self.setGeometry(1350, 100, 1000, 500)
+        self.setCentralWidget(ActuatorControlWidget(receiver, device_ip, device_port, self))
     
     def closeEvent(self, event):
         """Handle window close event"""
-        self.save_labels()
-        if self.command_sock:
-            try:
-                self.command_sock.close()
-            except:
-                pass
+        w = self.centralWidget()
+        if w and hasattr(w, 'save_labels'):
+            w.save_labels()
+        if w and hasattr(w, 'close_socket'):
+            w.close_socket()
+        event.accept()
+
+
+# ---------------------- Combined Main Window ----------------------
+class CombinedMainWindow(QtWidgets.QMainWindow):
+    """Single window with sensor plot (left 66%) and actuator control (right 33%)."""
+    def __init__(self, receiver, device_ip: str = DEFAULT_ACTUATOR_IP, device_port: int = DEFAULT_DEVICE_PORT, bind_address: str = '0.0.0.0'):
+        super().__init__()
+        self.setWindowTitle("Diablo Avionics – Sensor & Actuator")
+        
+        # Central widget container
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Main vertical layout
+        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Top Bar
+        self.top_bar_widget = TopBarWidget(self)
+        self.top_bar_widget.navigation_requested.connect(self.on_navigation_requested)
+        main_layout.addWidget(self.top_bar_widget)
+        
+        # Stacked Widget for Dashboard / Settings
+        self.stack = QtWidgets.QStackedWidget()
+        
+        # --- Page 1: Dashboard ---
+        dashboard_widget = QtWidgets.QWidget()
+        dashboard_layout = QtWidgets.QHBoxLayout(dashboard_widget)
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.sensor_widget = SensorPlotWidget(receiver, bind_address, self)
+        self.actuator_widget = ActuatorControlWidget(receiver, device_ip, device_port, self)
+        
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.addWidget(self.sensor_widget)
+        splitter.addWidget(self.actuator_widget)
+        splitter.setStretchFactor(0, 2)  # Left 66%
+        splitter.setStretchFactor(1, 1)  # Right 33%
+        
+        dashboard_layout.addWidget(splitter)
+        self.stack.addWidget(dashboard_widget)
+        
+        # --- Page 2: Settings ---
+        self.settings_widget = SettingsWidget(self.sensor_widget, self.actuator_widget)
+        self.settings_widget.mapping_changed.connect(self.on_mapping_changed)
+        self.stack.addWidget(self.settings_widget)
+        
+        main_layout.addWidget(self.stack, 1)
+        
+        # Connect sensor data for Top Bar updates
+        # leveraging the existing timer update in SensorPlotWidget is tricky without a signal
+        # simpler to just shadow the data
+        self.gauge_map = CONFIG.config["mappings"]
+        
+        self.update_timer = QtCore.QTimer(self)
+        self.update_timer.timeout.connect(self.update_top_bar)
+        self.update_timer.start(100)
+    
+    def on_navigation_requested(self, view_name):
+        if view_name == "settings":
+            self.settings_widget.load_values() # Refresh values on enter
+            self.stack.setCurrentWidget(self.settings_widget)
+        else:
+            self.stack.setCurrentIndex(0) # Dashboard
+            
+    def on_mapping_changed(self, gauge_name, pt_id):
+        self.gauge_map[gauge_name] = pt_id # Update local map for internal timer use
+        # CONFIG save is handled in settings_widget
+        
+    def update_top_bar(self):
+        # Poll sensor widget for latest PSI values
+        # Accessing private data sensor_psi_data directly for simplicity given the code structure
+        for gauge, pt_id in self.gauge_map.items():
+            val = 0.0
+            if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_data:
+                deque_data = self.sensor_widget.sensor_psi_data[pt_id]
+                if len(deque_data) > 0:
+                    val = deque_data[-1][1] # (time, psi)
+            
+            if gauge == "GN2":
+                self.top_bar_widget.bar_gn2.set_value(val)
+            elif gauge == "ETH":
+                self.top_bar_widget.bar_eth.set_value(val)
+            elif gauge == "LOX":
+                self.top_bar_widget.bar_lox.set_value(val)
+    
+    def closeEvent(self, event):
+        """Handle window close: save labels and close actuator socket."""
+        # ConfigManager handles saving on change, so explicit save here might be redundant 
+        # but safe to keep close actions for sockets
+        if hasattr(self, 'actuator_widget') and self.actuator_widget:
+            if hasattr(self.actuator_widget, 'close_socket'):
+                self.actuator_widget.close_socket()
         event.accept()
 
 
 # ---------------------- Settings Dialogs ----------------------
-class SensorSettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Sensor Display Settings")
-        self.window_seconds = parent.window_seconds
-        self.adc_bits = parent.adc_bits
-        self.reference_voltage = parent.reference_voltage
-        self.filter_source_ip = parent.filter_source_ip
-        self.y_axis_min = parent.y_axis_min
-        self.y_axis_max = parent.y_axis_max
-        
-        layout = QtWidgets.QVBoxLayout(self)
-        
-        # Time window
-        layout.addWidget(QtWidgets.QLabel("Time Window (seconds)"))
-        row = QtWidgets.QHBoxLayout()
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slider.setMinimum(1)
-        self.slider.setMaximum(60)
-        self.slider.setValue(int(self.window_seconds))
-        self.slider.valueChanged.connect(self._on_time_window_change)
-        self.lbl = QtWidgets.QLabel(f"{self.window_seconds:.1f}s")
-        row.addWidget(self.slider, 1)
-        row.addWidget(self.lbl)
-        layout.addLayout(row)
-        
-        # ADC Settings group
-        adc_group = QtWidgets.QGroupBox("ADC Conversion Settings")
-        adc_layout = QtWidgets.QVBoxLayout()
-        
-        # ADC bit count
-        adc_layout.addWidget(QtWidgets.QLabel("ADC Bit Count:"))
-        self.adc_bits_spinbox = QtWidgets.QSpinBox()
-        self.adc_bits_spinbox.setRange(8, 32)
-        self.adc_bits_spinbox.setValue(self.adc_bits)
-        self.adc_bits_spinbox.setSuffix(" bits")
-        adc_layout.addWidget(self.adc_bits_spinbox)
-        
-        # Reference voltage
-        adc_layout.addWidget(QtWidgets.QLabel("Reference Voltage (V):"))
-        self.ref_voltage_spinbox = QtWidgets.QDoubleSpinBox()
-        self.ref_voltage_spinbox.setRange(0.1, 10.0)
-        self.ref_voltage_spinbox.setSingleStep(0.1)
-        self.ref_voltage_spinbox.setDecimals(3)
-        self.ref_voltage_spinbox.setValue(self.reference_voltage)
-        self.ref_voltage_spinbox.setSuffix(" V")
-        adc_layout.addWidget(self.ref_voltage_spinbox)
-        
-        adc_group.setLayout(adc_layout)
-        layout.addWidget(adc_group)
-        
-        # IP Filter Settings group
-        ip_group = QtWidgets.QGroupBox("Data Source Filter")
-        ip_layout = QtWidgets.QVBoxLayout()
-        
-        # Source IP filter
-        ip_layout.addWidget(QtWidgets.QLabel("Accept data only from IP:"))
-        self.source_ip_edit = QtWidgets.QLineEdit(self.filter_source_ip)
-        self.source_ip_edit.setPlaceholderText("e.g., 192.168.2.101")
-        ip_layout.addWidget(self.source_ip_edit)
-        
-        ip_group.setLayout(ip_layout)
-        layout.addWidget(ip_group)
-        
-        # Y-axis Settings group
-        yaxis_group = QtWidgets.QGroupBox("Y-Axis Range (when not auto-scaling)")
-        yaxis_layout = QtWidgets.QVBoxLayout()
-        
-        # Y-axis minimum
-        yaxis_layout.addWidget(QtWidgets.QLabel("Y-Axis Minimum (psi):"))
-        self.y_min_spinbox = QtWidgets.QDoubleSpinBox()
-        self.y_min_spinbox.setRange(-1000.0, 10000.0)
-        self.y_min_spinbox.setSingleStep(10.0)
-        self.y_min_spinbox.setDecimals(1)
-        self.y_min_spinbox.setValue(self.y_axis_min)
-        self.y_min_spinbox.setSuffix(" psi")
-        yaxis_layout.addWidget(self.y_min_spinbox)
-        
-        # Y-axis maximum
-        yaxis_layout.addWidget(QtWidgets.QLabel("Y-Axis Maximum (psi):"))
-        self.y_max_spinbox = QtWidgets.QDoubleSpinBox()
-        self.y_max_spinbox.setRange(-1000.0, 10000.0)
-        self.y_max_spinbox.setSingleStep(10.0)
-        self.y_max_spinbox.setDecimals(1)
-        self.y_max_spinbox.setValue(self.y_axis_max)
-        self.y_max_spinbox.setSuffix(" psi")
-        yaxis_layout.addWidget(self.y_max_spinbox)
-        
-        yaxis_group.setLayout(yaxis_layout)
-        layout.addWidget(yaxis_group)
-        
-        # Close button
-        btn = QtWidgets.QPushButton("Close")
-        btn.clicked.connect(self.accept)
-        layout.addWidget(btn)
-    
-    def _on_time_window_change(self, val):
-        self.window_seconds = float(val)
-        self.lbl.setText(f"{float(val):.1f}s")
-    
-    def accept(self):
-        """Update values when dialog is accepted"""
-        self.adc_bits = self.adc_bits_spinbox.value()
-        self.reference_voltage = self.ref_voltage_spinbox.value()
-        self.filter_source_ip = self.source_ip_edit.text().strip()
-        self.y_axis_min = self.y_min_spinbox.value()
-        self.y_axis_max = self.y_max_spinbox.value()
-        super().accept()
 
 
-class ActuatorSettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("Actuator Control Settings")
-        self.device_ip = parent.device_ip
-        self.device_port = parent.device_port
-        
-        layout = QtWidgets.QVBoxLayout(self)
-        
-        # Device IP
-        layout.addWidget(QtWidgets.QLabel("Device IP Address:"))
-        self.ip_edit = QtWidgets.QLineEdit(self.device_ip)
-        layout.addWidget(self.ip_edit)
-        
-        # Device port
-        layout.addWidget(QtWidgets.QLabel("Device Port (for commands):"))
-        self.device_port_edit = QtWidgets.QSpinBox()
-        self.device_port_edit.setRange(1, 65535)
-        self.device_port_edit.setValue(self.device_port)
-        layout.addWidget(self.device_port_edit)
-        
-        # Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        ok_btn = QtWidgets.QPushButton("OK")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QtWidgets.QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(ok_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-    
-    def accept(self):
-        """Validate and accept settings"""
-        self.device_ip = self.ip_edit.text()
-        self.device_port = self.device_port_edit.value()
-        super().accept()
+
+
 
 
 # ---------------------- Main Application ----------------------
@@ -1457,36 +1948,34 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Combined Sensor & Actuator Control GUI',
+        description='Combined Sensor & Actuator Control GUI (single full-screen window)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Opens two separate windows:
-1. Sensor Data Receiver - Real-time plotting of sensor data
-2. Actuator Control - Control actuators and monitor voltage
+Opens one full-screen window: sensor plot on the left, actuator control on the right.
 
 Examples:
   %(prog)s                              # Use default settings
-  %(prog)s -i 192.168.2.100             # Specify device IP
+  %(prog)s -i 192.168.2.100             # Specify actuator device IP
   %(prog)s -p 5006                      # Specify receive port
         """
     )
     parser.add_argument(
         '-i', '--ip',
         type=str,
-        default=DEFAULT_ACTUATOR_IP,
-        help=f'Actuator board IP address (default: {DEFAULT_ACTUATOR_IP})'
+        default=CONFIG.config["network"]["actuator_ip"],
+        help=f'Actuator board IP address (default from config: {CONFIG.config["network"]["actuator_ip"]})'
     )
     parser.add_argument(
         '-p', '--port',
         type=int,
-        default=DEFAULT_RECEIVE_PORT,
-        help=f'UDP port to receive sensor data on (default: {DEFAULT_RECEIVE_PORT})'
+        default=CONFIG.config["network"]["receive_port"],
+        help=f'UDP port to receive sensor data on (default from config: {CONFIG.config["network"]["receive_port"]})'
     )
     parser.add_argument(
         '-d', '--device-port',
         type=int,
-        default=DEFAULT_DEVICE_PORT,
-        help=f'Device UDP port for actuator commands (default: {DEFAULT_DEVICE_PORT})'
+        default=CONFIG.config["network"]["actuator_port"],
+        help=f'Device UDP port for actuator commands (default from config: {CONFIG.config["network"]["actuator_port"]})'
     )
     parser.add_argument(
         '-a', '--address',
@@ -1499,17 +1988,37 @@ Examples:
     
     app = QtWidgets.QApplication(sys.argv)
     
+    # Force Fusion style and dark palette (WSL doesn't always pick up system theme)
+    app.setStyle("Fusion")
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.WindowText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Base, QtGui.QColor(25, 25, 25))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.ToolTipBase, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.ToolTipText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Text, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.ButtonText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.BrightText, QtCore.Qt.GlobalColor.red)
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Link, QtGui.QColor(42, 130, 218))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(42, 130, 218))
+    palette.setColor(QtGui.QPalette.ColorGroup.All, QtGui.QPalette.ColorRole.HighlightedText, QtCore.Qt.GlobalColor.black)
+    app.setPalette(palette)
+    
     # Create shared UDP receiver
     receiver = UDPReceiver(port=args.port, bind_address=args.address)
     receiver.start()
     
-    # Create both windows
-    sensor_window = SensorPlotWindow(receiver, bind_address=args.address)
-    actuator_window = ActuatorControlWindow(receiver, device_ip=args.ip, device_port=args.device_port)
-    
-    # Show both windows
-    sensor_window.show()
-    actuator_window.show()
+    # Create single combined window (sensor plot left, actuator control right)
+    window = CombinedMainWindow(
+        receiver,
+        device_ip=args.ip,
+        device_port=args.device_port,
+        bind_address=args.address,
+    )
+    # Start maximized as requested
+    window.showMaximized()
     
     # Handle cleanup when app exits
     def cleanup():
