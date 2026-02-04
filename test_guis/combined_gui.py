@@ -11,6 +11,7 @@ Requirements: pip install pyqt6 pyqtgraph numpy
 import csv
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 from collections import deque
 
-# PT calibration CSV (relative to this file); used to show psi for connectors 1–3
+# PT calibration CSV (relative to this file); used to show psi for PT connectors present in CSV
 PT_CALIBRATION_CSV = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "PT_Board", "Calibration", "PT Calibration Attempt 2026-02-03_test5.csv"
@@ -123,21 +124,30 @@ def calculate_pressure(raw_value: float, PT_A: float, PT_B: float, PT_C: float, 
 def load_pt_calibration(csv_path: str) -> Dict[int, Tuple[float, float, float, float]]:
     """
     Load PT calibration coefficients from CSV.
-    Returns dict: connector_id (1–3) -> (PT_A, PT_B, PT_C, PT_D).
+    Returns dict: connector_id -> (PT_A, PT_B, PT_C, PT_D) for each PT present in the CSV.
     CSV columns per PT: Voltage, Pressure, Coefficient 0 (A), 1 (B), 2 (C), 3 (D).
     Uses the last data row as the calibration coefficients.
+    Works with any number of PTs; PT numbers are discovered from column names "PT{N} Coefficient 0".
     """
     result = {}
     if not os.path.isfile(csv_path):
         return result
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            fieldnames = reader.fieldnames or []
         if not rows:
             return result
+        # Discover PT numbers from column names (e.g. "PT1 Coefficient 0" -> pt_num 1)
+        pt_nums = set()
+        for col in fieldnames:
+            m = re.match(r"PT(\d+)\s+Coefficient\s+0", col, re.IGNORECASE)
+            if m:
+                pt_nums.add(int(m.group(1)))
         # Use last row for coefficients (final calibration state)
         last = rows[-1]
-        for pt_num in (1, 2, 3):
+        for pt_num in sorted(pt_nums):
             a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
             b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
             c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
