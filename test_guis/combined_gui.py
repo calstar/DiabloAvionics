@@ -276,7 +276,7 @@ def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
 # ---------------------- UDP Receiver Thread ----------------------
 class UDPReceiver(QtCore.QThread):
     """Thread that receives UDP packets and emits decoded sensor data"""
-    sensor_data_received = QtCore.pyqtSignal(dict, list)  # header, chunks
+    sensor_data_received = QtCore.pyqtSignal(dict, list, str)  # header, chunks, source_ip
     status_update = QtCore.pyqtSignal(str)
     packet_received = QtCore.pyqtSignal(int, int)  # packet_size, packet_type
     
@@ -351,7 +351,8 @@ class UDPReceiver(QtCore.QThread):
                     result = parse_sensor_data_packet(data)
                     if result:
                         header_dict, chunks = result
-                        self.sensor_data_received.emit(header_dict, chunks)
+                        source_ip = addr[0]  # Extract IP address from (ip, port) tuple
+                        self.sensor_data_received.emit(header_dict, chunks, source_ip)
                         
             except socket.timeout:
                 continue
@@ -381,6 +382,9 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         # ADC conversion settings
         self.adc_bits = 32  # ADC bit count (default: 32-bit)
         self.reference_voltage = 2.5  # Reference voltage in Volts (default: 2.5V)
+        
+        # IP filter for sensor data (default to sensor board IP)
+        self.filter_source_ip = DEFAULT_SENSOR_IP  # Only accept data from this IP
         
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}
@@ -645,8 +649,12 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
         """Handle packet received notification"""
         pass  # Statistics are updated separately
     
-    def on_sensor_data(self, header: dict, chunks: List[dict]):
+    def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
         """Handle received sensor data"""
+        # Filter by source IP - only accept data from configured sensor board
+        if source_ip != self.filter_source_ip:
+            return  # Ignore data from other sources
+        
         current_time = time.time()
         
         for chunk in chunks:
@@ -804,6 +812,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
             self.window_seconds = dialog.window_seconds
             self.adc_bits = dialog.adc_bits
             self.reference_voltage = dialog.reference_voltage
+            self.filter_source_ip = dialog.filter_source_ip
 
 
 # ---------------------- Actuator Control Window ----------------------
@@ -1002,8 +1011,11 @@ class ActuatorControlWindow(QtWidgets.QMainWindow):
         # Only update if it's relevant to actuator control
         pass
     
-    def on_sensor_data(self, header: dict, chunks: List[dict]):
+    def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
         """Handle received sensor data (voltage readings)"""
+        # Actuator board accepts data from any source (no filtering for now)
+        # Could add filtering here if needed in the future
+        
         # Process the latest chunk
         if chunks:
             latest_chunk = chunks[-1]
@@ -1150,6 +1162,7 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         self.window_seconds = parent.window_seconds
         self.adc_bits = parent.adc_bits
         self.reference_voltage = parent.reference_voltage
+        self.filter_source_ip = parent.filter_source_ip
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -1191,6 +1204,19 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         adc_group.setLayout(adc_layout)
         layout.addWidget(adc_group)
         
+        # IP Filter Settings group
+        ip_group = QtWidgets.QGroupBox("Data Source Filter")
+        ip_layout = QtWidgets.QVBoxLayout()
+        
+        # Source IP filter
+        ip_layout.addWidget(QtWidgets.QLabel("Accept data only from IP:"))
+        self.source_ip_edit = QtWidgets.QLineEdit(self.filter_source_ip)
+        self.source_ip_edit.setPlaceholderText("e.g., 192.168.2.101")
+        ip_layout.addWidget(self.source_ip_edit)
+        
+        ip_group.setLayout(ip_layout)
+        layout.addWidget(ip_group)
+        
         # Close button
         btn = QtWidgets.QPushButton("Close")
         btn.clicked.connect(self.accept)
@@ -1204,6 +1230,7 @@ class SensorSettingsDialog(QtWidgets.QDialog):
         """Update values when dialog is accepted"""
         self.adc_bits = self.adc_bits_spinbox.value()
         self.reference_voltage = self.ref_voltage_spinbox.value()
+        self.filter_source_ip = self.source_ip_edit.text().strip()
         super().accept()
 
 
