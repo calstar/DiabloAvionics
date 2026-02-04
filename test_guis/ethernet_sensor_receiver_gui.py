@@ -34,8 +34,9 @@ class PacketType:
     ABORT_DONE = 8
     CLEAR_ABORT = 9
 
-# Default UDP port
+# Default UDP port and device IP
 DEFAULT_PORT = 5006
+DEFAULT_DEVICE_IP = '192.168.2.101'  # Sensor board IP address
 
 # Struct format strings (little-endian, matching C++ packed structs)
 PACKET_HEADER_FORMAT = '<BBI'  # 6 bytes total

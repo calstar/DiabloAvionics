@@ -55,7 +55,7 @@ class PacketType:
     CLEAR_ABORT = 9
 
 # Default configuration
-DEFAULT_DEVICE_IP = '192.168.2.100'
+DEFAULT_DEVICE_IP = '192.168.2.201'  # Actuator board IP address
 DEFAULT_DEVICE_PORT = 5005  # Port device listens on for actuator commands
 DEFAULT_RECEIVE_PORT = 5006  # Port device sends sensor data to
 
@@ -671,7 +671,7 @@ Examples:
         '-i', '--ip',
         type=str,
         default=DEFAULT_DEVICE_IP,
-        help=f'Device IP address (default: {DEFAULT_DEVICE_IP})'
+        help=f'Actuator board IP address (default: {DEFAULT_DEVICE_IP})'
     )
     parser.add_argument(
         '-p', '--port',

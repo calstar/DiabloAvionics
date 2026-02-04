@@ -65,7 +65,8 @@ class PacketType:
     CLEAR_ABORT = 9
 
 # Default configuration
-DEFAULT_DEVICE_IP = '192.168.2.100'
+DEFAULT_SENSOR_IP = '192.168.2.101'  # Sensor board IP address
+DEFAULT_ACTUATOR_IP = '192.168.2.201'  # Actuator board IP address
 DEFAULT_DEVICE_PORT = 5005  # Port device listens on for actuator commands
 DEFAULT_RECEIVE_PORT = 5006  # Port device sends sensor data to
 
@@ -807,7 +808,7 @@ class SensorPlotWindow(QtWidgets.QMainWindow):
 
 # ---------------------- Actuator Control Window ----------------------
 class ActuatorControlWindow(QtWidgets.QMainWindow):
-    def __init__(self, receiver, device_ip: str = DEFAULT_DEVICE_IP, device_port: int = DEFAULT_DEVICE_PORT):
+    def __init__(self, receiver, device_ip: str = DEFAULT_ACTUATOR_IP, device_port: int = DEFAULT_DEVICE_PORT):
         super().__init__()
         self.receiver = receiver
         self.device_ip = device_ip
@@ -1256,8 +1257,8 @@ Examples:
     parser.add_argument(
         '-i', '--ip',
         type=str,
-        default=DEFAULT_DEVICE_IP,
-        help=f'Device IP address (default: {DEFAULT_DEVICE_IP})'
+        default=DEFAULT_ACTUATOR_IP,
+        help=f'Actuator board IP address (default: {DEFAULT_ACTUATOR_IP})'
     )
     parser.add_argument(
         '-p', '--port',

@@ -30,7 +30,7 @@ using namespace sense_board_pins;
 
 // Ethernet configuration
 byte mac[6];  // Will be populated with unique MAC from ESP32 eFuse
-IPAddress staticIP(192, 168, 2, 100);
+IPAddress staticIP(192, 168, 2, 101);
 IPAddress gateway(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
