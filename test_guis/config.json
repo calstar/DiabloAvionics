@@ -1,27 +1,54 @@
 {
-    "actuators": {
-        "1": "LOX Main",
-        "2": "Fuel Main",
-        "3": "",
-        "4": "Fuel Vent",
-        "5": "",
-        "6": "Fuel Press",
-        "7": "LOX Vent",
-        "8": "",
-        "9": "",
-        "10": "LOX Press"
+    "actuator_role_names": [
+        "LOX Main",
+        "Fuel Vent",
+        "Fuel Press",
+        "LOX Press",
+        "LOX Vent",
+        "Fuel Main"
+    ],
+    "actuator_roles": {
+        "LOX Main": [
+            "NO",
+            1
+        ],
+        "Fuel Main": [
+            "NC",
+            7
+        ],
+        "Fuel Vent": [
+            "NC",
+            2
+        ],
+        "Fuel Press": [
+            "NO",
+            3
+        ],
+        "LOX Vent": [
+            "NC",
+            6
+        ],
+        "LOX Press": [
+            "NC",
+            4
+        ]
     },
-    "sensors": {
-        "1": "LOX Upstream",
-        "2": "Fuel Downstream",
-        "3": "LOX Upstream",
-        "4": "",
-        "5": "",
-        "6": "Fuel Upstream",
-        "7": "",
-        "8": "",
-        "9": "",
-        "10": ""
+    "sensor_roles": {
+        "GSE Low": 2,
+        "GSE Mid": 3,
+        "GN2 Regulated": 4,
+        "Fuel Upstream": 1,
+        "Fuel Downstream": 6,
+        "Ox Upstream": 5,
+        "Ox Downstream": 7
+    },
+    "actuator_abbrev_to_role": {
+        "FV": "Fuel Vent",
+        "OV": "LOX Vent",
+        "FP": "Fuel Press",
+        "OP": "LOX Press",
+        "FM": "Fuel Main",
+        "OM": "LOX Main"
     },
     "network": {
         "actuator_ip": "192.168.2.201",
@@ -32,14 +59,48 @@
     "display": {
         "adc_bits": 32,
         "ref_voltage": 2.5,
-        "window_seconds": 10.0,
+        "window_seconds": 42.0,
         "y_axis_min": 0.0,
-        "y_axis_max": 200.0,
-        "y_axis_autoscale": true
+        "y_axis_max": 700.0,
+        "y_axis_autoscale": true,
+        "only_show_actuators_with_roles": true,
+        "only_show_pt_with_roles": true,
+        "graph_ma_samples": 1,
+        "display_ma_samples": 1
     },
     "mappings": {
-        "GN2": 1,
-        "ETH": 2,
-        "LOX": 3
+        "GN2": 4,
+        "ETH": 1,
+        "LOX": 5
+    },
+    "pressure_limits": {
+        "GN2": {
+            "THRESH": 550,
+            "NOP": 900,
+            "MEOP": 950,
+            "POP": 981.0
+        },
+        "ETH": {
+            "THRESH": 550.0,
+            "NOP": 600,
+            "MEOP": 650,
+            "POP": 750
+        },
+        "LOX": {
+            "THRESH": 550,
+            "NOP": 600,
+            "MEOP": 650,
+            "POP": 750
+        }
+    },
+    "num_connectors": 10,
+    "num_actuators": 10,
+    "paths": {
+        "pt_calibration_csv": [
+            "pt_cali1.csv",
+            "pt_cali2.csv"
+        ],
+        "state_machine_csv": "state_machine_actuators.csv",
+        "state_transitions_csv": "state_transitions.csv"
     }
 }

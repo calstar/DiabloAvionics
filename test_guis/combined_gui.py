@@ -96,6 +96,19 @@ MAX_POINTS = 10000
 UPDATE_INTERVAL_MS = 50  # Update plots every 50ms
 NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
 NUM_ACTUATORS = 10
+# Default role names (used only when config is missing); actual names come from config
+DEFAULT_ACTUATOR_ROLE_NAMES = ["LOX Main", "Fuel Main", "Fuel Vent", "Fuel Press", "LOX Vent", "LOX Press"]
+DEFAULT_SENSOR_ROLE_NAMES = ["LOX Upstream", "LOX Downstream", "Low Press PT", "Fuel Downstream"]
+DEFAULT_ACTUATOR_ABBREV_TO_ROLE = {
+    "FV": "Fuel Vent",
+    "OV": "LOX Vent",
+    "FP": "Fuel Press",
+    "OP": "LOX Press",
+    "FM": "Fuel Main",
+    "OM": "LOX Main",
+}
+# When "only show actuators with roles" is true: display order in grid (row1 vents, row2 press, row3 mains; col1 fuel, col2 lox)
+ACTUATOR_DISPLAY_ORDER_WHEN_ROLES = ["Fuel Vent", "LOX Vent", "Fuel Press", "LOX Press", "Fuel Main", "LOX Main"]
 ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
 SENSOR_LABELS_FILE = Path(__file__).parent / "sensor_labels.json"
 
@@ -116,13 +129,21 @@ SENSOR_COLORS = [
 
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
+_DEFAULT_STATE_MACHINE_CSV = Path(__file__).parent / "state_machine_actuators.csv"
+_DEFAULT_STATE_TRANSITIONS_CSV = Path(__file__).parent / "state_transitions.csv"
 
 class ConfigManager:
-    """Manages loading and saving of application configuration."""
+    """Manages loading and saving of application configuration.
+    Actuator/PT names and mapping are stored in config (actuator_role_names, actuator_roles,
+    sensor_roles, actuator_abbrev_to_role). Sensor role names and labels come from sensor_roles keys.
+    All settings read from and save to config.
+    """
     def __init__(self):
         self.config = {
-            "actuators": {str(i): "" for i in range(1, NUM_ACTUATORS + 1)},
-            "sensors": {str(i): "" for i in range(1, NUM_CONNECTORS + 1)},
+            "actuator_role_names": list(DEFAULT_ACTUATOR_ROLE_NAMES),
+            "actuator_roles": {name: 0 for name in DEFAULT_ACTUATOR_ROLE_NAMES},
+            "sensor_roles": {name: 0 for name in DEFAULT_SENSOR_ROLE_NAMES},
+            "actuator_abbrev_to_role": dict(DEFAULT_ACTUATOR_ABBREV_TO_ROLE),
             "network": {
                 "actuator_ip": DEFAULT_ACTUATOR_IP,
                 "actuator_port": DEFAULT_DEVICE_PORT,
@@ -134,13 +155,29 @@ class ConfigManager:
                 "ref_voltage": 2.5,
                 "window_seconds": DEFAULT_WINDOW_SECONDS,
                 "y_axis_min": 0.0,
-                "y_axis_max": 200.0,
-                "y_axis_autoscale": True
+                "y_axis_max": 700.0,
+                "y_axis_autoscale": True,
+                "only_show_actuators_with_roles": False,
+                "only_show_pt_with_roles": False,
+                "graph_ma_samples": 1,
+                "display_ma_samples": 1,
             },
             "mappings": {
                 "GN2": 0,
                 "ETH": 0,
                 "LOX": 0
+            },
+            "pressure_limits": {
+                "GN2": {"THRESH": 550, "NOP": 900, "MEOP": 950, "POP": 1000},
+                "ETH": {"THRESH": 550, "NOP": 600, "MEOP": 650, "POP": 750},
+                "LOX": {"THRESH": 550, "NOP": 600, "MEOP": 650, "POP": 750},
+            },
+            "num_connectors": 10,
+            "num_actuators": 10,
+            "paths": {
+                "pt_calibration_csv": [],  # List of CSV paths (empty = use default)
+                "state_machine_csv": "",
+                "state_transitions_csv": "",
             }
         }
         self.load()
@@ -150,43 +187,53 @@ class ConfigManager:
             try:
                 with open(CONFIG_FILE, 'r') as f:
                     loaded = json.load(f)
-                    # Recursive update to preserve defaults for missing keys
                     self._update_dict(self.config, loaded)
+                    # sensor_roles: use only what's in the file (no merge with defaults)
+                    if "sensor_roles" in loaded and isinstance(loaded["sensor_roles"], dict):
+                        self.config["sensor_roles"] = dict(loaded["sensor_roles"])
+                self._backfill_role_names()
             except Exception as e:
                 print(f"Error loading config: {e}")
         else:
-            # Config doesn't exist, try to migrate legacy labels
-            print("Config file not found. checking for legacy label files...")
-            self._migrate_legacy_labels()
-            # Save the new config immediately
             self.save()
 
-    def _migrate_legacy_labels(self):
-        # Migrate Actuator Labels
-        if ACTUATOR_LABELS_FILE.exists():
-            try:
-                with open(ACTUATOR_LABELS_FILE, 'r') as f:
-                    labels = json.load(f)
-                    for k, v in labels.items():
-                        if k in self.config["actuators"]:
-                            self.config["actuators"][k] = v
-                print(f"Migrated actuator labels from {ACTUATOR_LABELS_FILE}")
-            except Exception as e:
-                print(f"Error migrating actuator labels: {e}")
-
-        # Migrate Sensor Labels
-        if SENSOR_LABELS_FILE.exists():
-            try:
-                with open(SENSOR_LABELS_FILE, 'r') as f:
-                    labels = json.load(f)
-                    for k, v in labels.items():
-                        # Support both "1" and "PT1" style keys just in case, though file implies IDs
-                        # The legacy code keys were strings of ints "1", "2"
-                        if k in self.config["sensors"]:
-                            self.config["sensors"][k] = v
-                print(f"Migrated sensor labels from {SENSOR_LABELS_FILE}")
-            except Exception as e:
-                print(f"Error migrating sensor labels: {e}")
+    def _backfill_role_names(self):
+        """Ensure actuator_role_names/actuator_roles exist; sensor_roles is single source for sensor names and mappings."""
+        roles = self.config.setdefault("actuator_roles", {})
+        names = self.config.get("actuator_role_names")
+        if not names:
+            names = list(roles.keys()) if roles else list(DEFAULT_ACTUATOR_ROLE_NAMES)
+            self.config["actuator_role_names"] = names
+        for name in names:
+            if name not in roles:
+                roles[name] = 0
+        # Sensor roles: merge legacy sensor_role_names into sensor_roles, then remove sensor_role_names
+        roles = self.config.setdefault("sensor_roles", {})
+        legacy_names = self.config.pop("sensor_role_names", None)
+        if legacy_names:
+            # Preserve order: first legacy names, then any existing keys not in legacy
+            ordered = []
+            for name in legacy_names:
+                if name not in roles:
+                    roles[name] = 0
+                ordered.append(name)
+            for k in roles:
+                if k not in ordered:
+                    ordered.append(k)
+            self.config["sensor_roles"] = {k: roles[k] for k in ordered}
+        # Do not add default sensor role names; GUI shows only what is in config sensor_roles
+        if "actuator_abbrev_to_role" not in self.config:
+            self.config["actuator_abbrev_to_role"] = dict(DEFAULT_ACTUATOR_ABBREV_TO_ROLE)
+        if "num_connectors" not in self.config:
+            self.config["num_connectors"] = 10
+        if "num_actuators" not in self.config:
+            self.config["num_actuators"] = 10
+        if "paths" not in self.config:
+            self.config["paths"] = {"pt_calibration_csv": [], "state_machine_csv": "", "state_transitions_csv": ""}
+        # Migrate old string format to list format for pt_calibration_csv
+        if isinstance(self.config.get("paths", {}).get("pt_calibration_csv"), str):
+            old_val = self.config["paths"]["pt_calibration_csv"]
+            self.config["paths"]["pt_calibration_csv"] = [old_val] if old_val.strip() else []
 
     def save(self):
         try:
@@ -203,16 +250,292 @@ class ConfigManager:
             else:
                 target[k] = v
 
-    # Helpers
-    def get_actuator_label(self, idx): return self.config["actuators"].get(str(idx), "")
-    def set_actuator_label(self, idx, txt): self.config["actuators"][str(idx)] = txt; self.save()
+    def get_actuator_role_names(self):
+        """Ordered list of actuator role names (from config)."""
+        return self.config.get("actuator_role_names") or list(self.config.get("actuator_roles", {}).keys()) or list(DEFAULT_ACTUATOR_ROLE_NAMES)
+
+    def get_sensor_role_names(self):
+        """Ordered list of PT/sensor role names (keys of sensor_roles in config). Only what's in config, no hardcoded defaults."""
+        return list(self.config.get("sensor_roles", {}).keys())
+
+    def get_actuator_abbrev_to_role(self):
+        """Map state-machine abbreviation -> actuator role name (from config)."""
+        return self.config.get("actuator_abbrev_to_role") or dict(DEFAULT_ACTUATOR_ABBREV_TO_ROLE)
+
+    def get_num_connectors(self):
+        return int(self.config.get("num_connectors", 10))
+
+    def get_num_actuators(self):
+        return int(self.config.get("num_actuators", 10))
+
+    def get_pt_calibration_csv_paths(self):
+        """Get list of PT calibration CSV paths from config.
+        Returns list of paths (empty list means use default).
+        Supports both old format (single string) and new format (list)."""
+        p = (self.config.get("paths") or {}).get("pt_calibration_csv", "")
+        if isinstance(p, list):
+            return [path.strip() for path in p if path and path.strip()]
+        elif isinstance(p, str):
+            return [p.strip()] if p.strip() else []
+        else:
+            return []
+
+    def get_state_machine_csv_path(self):
+        p = (self.config.get("paths") or {}).get("state_machine_csv", "").strip()
+        return Path(p) if p else _DEFAULT_STATE_MACHINE_CSV
+
+    def get_state_transitions_csv_path(self):
+        p = (self.config.get("paths") or {}).get("state_transitions_csv", "").strip()
+        return Path(p) if p else _DEFAULT_STATE_TRANSITIONS_CSV
+
+    # Helpers: config stores role → id; these derive label for a slot/connector for display
+    def get_actuator_label(self, idx):
+        roles = self.config.get("actuator_roles", {})
+        for role, aid in roles.items():
+            # Handle both old format (int) and new format ([NC/NO, id])
+            actuator_id = aid[1] if isinstance(aid, list) and len(aid) == 2 else aid
+            if actuator_id == idx:
+                return role
+        return ""
+
+    def set_actuator_role(self, role_name, actuator_id):
+        if role_name not in self.get_actuator_role_names():
+            return
+        role_names = self.get_actuator_role_names()
+        roles = self.config.setdefault("actuator_roles", {name: 0 for name in role_names})
+        # Clear any existing assignment of this actuator_id to other roles
+        for r, aid in list(roles.items()):
+            # Handle both old format (int) and new format ([NC/NO, id])
+            existing_id = aid[1] if isinstance(aid, list) and len(aid) == 2 else aid
+            if existing_id == actuator_id and r != role_name:
+                roles[r] = 0
+        # Preserve NC/NO type if it exists, otherwise default to NC
+        existing_value = roles.get(role_name, 0)
+        if isinstance(existing_value, list) and len(existing_value) == 2:
+            # Preserve the NC/NO type, update the ID
+            roles[role_name] = [existing_value[0], int(actuator_id) if actuator_id else 0]
+        else:
+            # New assignment or old format - default to NC
+            if actuator_id:
+                roles[role_name] = ['NC', int(actuator_id)]
+            else:
+                roles[role_name] = 0
+        self.save()
+
+    def get_sensor_label(self, idx):
+        roles = self.config.get("sensor_roles", {})
+        for role, cid in roles.items():
+            if cid == idx:
+                return role
+        return ""
+
+    def set_sensor_role(self, role_name, connector_id):
+        roles = self.config.setdefault("sensor_roles", {})
+        if role_name not in roles:
+            roles[role_name] = 0  # allow new role from settings (e.g. after migration)
+        for r, cid in list(roles.items()):
+            if cid == connector_id and r != role_name:
+                roles[r] = 0
+        roles[role_name] = int(connector_id) if connector_id else 0
+        self.save()
+
+    def get_actuator_role(self, role_name):
+        """Get actuator ID for a role. Returns 0 if not found or unassigned."""
+        aid = self.config.get("actuator_roles", {}).get(role_name, 0)
+        # Handle both old format (int) and new format ([NC/NO, id])
+        if isinstance(aid, list) and len(aid) == 2:
+            return aid[1]  # Return the ID (second element)
+        return aid
     
-    def get_sensor_label(self, idx): return self.config["sensors"].get(str(idx), "")
-    def set_sensor_label(self, idx, txt): self.config["sensors"][str(idx)] = txt; self.save()
+    def get_actuator_type(self, role_name):
+        """Get NC/NO type for an actuator role. Returns 'NC' if not found or unassigned."""
+        aid = self.config.get("actuator_roles", {}).get(role_name, 0)
+        # Handle both old format (int) and new format ([NC/NO, id])
+        if isinstance(aid, list) and len(aid) == 2:
+            return aid[0]  # Return NC or NO (first element)
+        return 'NC'  # Default to NC for backward compatibility
+    
+    def get_actuator_type_by_id(self, actuator_id):
+        """Get NC/NO type for an actuator by its ID. Returns 'NC' if not found."""
+        roles = self.config.get("actuator_roles", {})
+        for role, aid in roles.items():
+            # Handle both old format (int) and new format ([NC/NO, id])
+            if isinstance(aid, list) and len(aid) == 2:
+                if aid[1] == actuator_id:
+                    return aid[0]  # Return NC or NO
+            elif aid == actuator_id:
+                return 'NC'  # Default to NC for old format
+        return 'NC'  # Default to NC if not found
+
+    def get_sensor_role(self, role_name):
+        return self.config.get("sensor_roles", {}).get(role_name, 0)
 
 CONFIG = ConfigManager()
+# Apply config-driven counts so rest of code can use NUM_CONNECTORS / NUM_ACTUATORS
+NUM_CONNECTORS = CONFIG.get_num_connectors()
+NUM_ACTUATORS = CONFIG.get_num_actuators()
 
 pg.setConfigOptions(antialias=False)
+
+
+# ---------------------- State Machine CSV Loading ----------------------
+def load_state_machine_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
+    """
+    Load state machine CSV file.
+    Returns dict: state_name -> {actuator_abbrev -> OPEN/CLOSE}
+    CSV format: first row is header with state names (first column empty), first column of data rows is actuator abbreviations
+    """
+    state_machine = {}
+    if not csv_path.exists():
+        print(f"Warning: State machine CSV not found at {csv_path}")
+        return state_machine
+    
+    try:
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+            
+            if len(rows) < 2:
+                print(f"Warning: State machine CSV has insufficient rows")
+                return state_machine
+            
+            # First row is header: empty first cell, then state names
+            header = rows[0]
+            states = [col.strip() for col in header[1:] if col.strip()]  # Skip first empty column
+            
+            # Remaining rows: first column is actuator abbrev, rest are state values
+            for row in rows[1:]:
+                if len(row) < 2:
+                    continue
+                actuator_abbrev = row[0].strip()
+                if not actuator_abbrev:
+                    continue
+                
+                # For each state, store the OPEN/CLOSE value
+                for i, state in enumerate(states):
+                    if i + 1 < len(row):
+                        value = row[i + 1].strip().upper()
+                        # Skip Debug state column if present
+                        if state.strip().lower() == "debug":
+                            continue
+                        if state not in state_machine:
+                            state_machine[state] = {}
+                        # Skip "NO CHANGE" values
+                        if value in ['OPEN', 'CLOSE', 'CLOSED']:
+                            state_machine[state][actuator_abbrev] = 'OPEN' if value == 'OPEN' else 'CLOSE'
+                        # For "NO CHANGE", we don't store anything
+    except Exception as e:
+        print(f"Error loading state machine CSV: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return state_machine
+
+
+def load_state_transitions_csv(csv_path: Path) -> Dict[str, Dict[str, bool]]:
+    """
+    Load state transitions CSV file.
+    Returns dict: current_state -> {next_state -> allowed (True/False)}
+    CSV format: first row is header with next states, first column is current states
+    """
+    transitions = {}
+    if not csv_path.exists():
+        print(f"Warning: State transitions CSV not found at {csv_path}")
+        return transitions
+    
+    try:
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+            
+            if len(rows) < 2:
+                print(f"Warning: State transitions CSV has insufficient rows")
+                return transitions
+            
+            # First row is header: empty first cell, then next state names
+            header = rows[0]
+            next_states = [col.strip() for col in header[1:] if col.strip()]  # Skip first empty column
+            
+            # Remaining rows: first column is current state, rest are transition values (1/0)
+            for row in rows[1:]:
+                if len(row) < 2:
+                    continue
+                current_state = row[0].strip()
+                if not current_state:
+                    continue
+                
+                transitions[current_state] = {}
+                # For each next state, store whether transition is allowed
+                for i, next_state in enumerate(next_states):
+                    if i + 1 < len(row):
+                        value = row[i + 1].strip()
+                        # 1 = allowed, 0 = not allowed
+                        transitions[current_state][next_state] = (value == '1')
+    except Exception as e:
+        print(f"Error loading state transitions CSV: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return transitions
+
+
+def get_actuator_id_from_role(role_name: str) -> int:
+    """Get actuator ID from role name. Returns 0 if not found."""
+    return CONFIG.get_actuator_role(role_name)
+
+
+def apply_state_from_csv(actuator_widget, state_name: str, state_machine: Dict[str, Dict[str, str]]):
+    """
+    Apply actuator states from CSV for the given state name.
+    
+    Mapping:
+    - FV = Fuel Vent
+    - OV = LOX Vent  
+    - FP = Fuel Press
+    - OP = LOX Press
+    - FM = Fuel Main
+    - OM = LOX Main
+    """
+    if state_name not in state_machine:
+        print(f"Warning: State '{state_name}' not found in CSV")
+        return
+    
+    # Map CSV abbreviations to role names
+    abbrev_to_role = CONFIG.get_actuator_abbrev_to_role()
+    state_config = state_machine[state_name]
+
+    # Build desired GUI state for all actuators (1..NUM_ACTUATORS).
+    # Default anything not specified by the CSV mapping to CLOSED (0) so the right-side
+    # actuator display always reflects the full state when a mode is pressed.
+    desired_by_actuator_id: Dict[int, int] = {aid: 0 for aid in range(1, NUM_ACTUATORS + 1)}
+
+    # Fill desired states from CSV for the mapped actuators
+    for abbrev, action in state_config.items():
+        if abbrev not in abbrev_to_role:
+            print(f"Warning: Unknown actuator abbreviation '{abbrev}' in CSV")
+            continue
+        
+        role_name = abbrev_to_role[abbrev]
+        actuator_id = get_actuator_id_from_role(role_name)
+        
+        if actuator_id == 0:
+            print(f"Warning: Actuator role '{role_name}' ({abbrev}) not assigned to any actuator")
+            continue
+        
+        # Convert OPEN/CLOSE to GUI state (1 = OPEN, 0 = CLOSED)
+        gui_state = 1 if action == 'OPEN' else 0
+        # Only write if actuator_id is in our expected range
+        if 1 <= actuator_id <= NUM_ACTUATORS:
+            desired_by_actuator_id[actuator_id] = gui_state
+
+    # Apply to widget: update UI + send commands for any actuators that change.
+    # Use force=True to bypass manual control lock
+    for actuator_id in range(1, NUM_ACTUATORS + 1):
+        desired = desired_by_actuator_id.get(actuator_id, 0)
+        array_idx = actuator_id - 1
+        current = actuator_widget.actuator_states[array_idx] if 0 <= array_idx < len(actuator_widget.actuator_states) else None
+        if current is None or current != desired:
+            actuator_widget.set_actuator_state(actuator_id, desired, force=True)
 
 
 # ---------------------- PT pressure from calibration ----------------------
@@ -221,41 +544,95 @@ def calculate_pressure(adc_code: float, PT_A: float, PT_B: float, PT_C: float, P
     return (PT_A * (adc_code ** 3)) + (PT_B * (adc_code ** 2)) + (PT_C * adc_code) + PT_D
 
 
-def load_pt_calibration(csv_path: str) -> Dict[int, Tuple[float, float, float, float]]:
+def load_pt_calibration(csv_paths) -> Tuple[Dict[int, Tuple[float, float, float, float]], Optional[str]]:
     """
-    Load PT calibration coefficients from CSV.
-    Returns dict: connector_id -> (PT_A, PT_B, PT_C, PT_D) for each PT present in the CSV.
+    Load PT calibration coefficients from one or more CSV files.
+    Args:
+        csv_paths: Single CSV path (str) or list of CSV paths. Empty string/list uses default.
+    Returns:
+        Tuple of (result_dict, error_message):
+        - result_dict: connector_id -> (PT_A, PT_B, PT_C, PT_D) for each PT present in CSVs
+        - error_message: None if successful, error string if duplicates or other errors found
+    The number in the CSV (PT1, PT2, ...) is the board connector number; this same ID is used
+    everywhere: config.json sensor_roles, mappings, and packet sensor_id.
     CSV columns per PT: ADC Code, Pressure, Coefficient 0 (A), 1 (B), 2 (C), 3 (D).
     Uses the last data row as the calibration coefficients.
     Works with any number of PTs; PT numbers are discovered from column names "PT{N} Coefficient 0".
+    If multiple CSVs contain the same PT number, returns error message listing duplicates.
     """
     result = {}
-    if not os.path.isfile(csv_path):
-        return result
-    try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            fieldnames = reader.fieldnames or []
-        if not rows:
-            return result
-        # Discover PT numbers from column names (e.g. "PT1 Coefficient 0" -> pt_num 1)
-        pt_nums = set()
-        for col in fieldnames:
-            m = re.match(r"PT(\d+)\s+Coefficient\s+0", col, re.IGNORECASE)
-            if m:
-                pt_nums.add(int(m.group(1)))
-        # Use last row for coefficients (final calibration state)
-        last = rows[-1]
-        for pt_num in sorted(pt_nums):
-            a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
-            b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
-            c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
-            d = float(last.get(f"PT{pt_num} Coefficient 3", 0))
-            result[pt_num] = (a, b, c, d)
-        return result
-    except Exception:
-        return result
+    duplicates = {}  # pt_num -> list of CSV files that contain it
+    
+    # Normalize input: convert single string to list, handle empty/default
+    if isinstance(csv_paths, str):
+        csv_paths = [csv_paths] if csv_paths.strip() else []
+    elif not isinstance(csv_paths, list):
+        csv_paths = []
+    
+    # If empty list, use default
+    if not csv_paths:
+        csv_paths = [PT_CALIBRATION_CSV]
+    
+    # Track which CSV file contains which PT numbers (for duplicate reporting)
+    csv_pt_map = {}  # csv_path -> set of pt_nums
+    
+    # Load each CSV and merge results
+    for csv_path in csv_paths:
+        if not csv_path or not csv_path.strip():
+            continue
+        csv_path = csv_path.strip()
+        if not os.path.isfile(csv_path):
+            continue
+        
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                fieldnames = reader.fieldnames or []
+            if not rows:
+                continue
+            
+            # Discover PT numbers from column names (e.g. "PT1 Coefficient 0" -> pt_num 1)
+            pt_nums = set()
+            for col in fieldnames:
+                m = re.match(r"PT(\d+)\s+Coefficient\s+0", col, re.IGNORECASE)
+                if m:
+                    pt_nums.add(int(m.group(1)))
+            
+            csv_pt_map[csv_path] = pt_nums
+            
+            # Use last row for coefficients (final calibration state)
+            last = rows[-1]
+            for pt_num in sorted(pt_nums):
+                # Check for duplicates
+                if pt_num in result:
+                    if pt_num not in duplicates:
+                        duplicates[pt_num] = []
+                        # Find which CSV(s) already had this PT
+                        for prev_path, prev_pt_nums in csv_pt_map.items():
+                            if prev_path == csv_path:
+                                continue  # Skip current CSV
+                            if pt_num in prev_pt_nums:
+                                duplicates[pt_num].append(os.path.basename(prev_path))
+                    duplicates[pt_num].append(os.path.basename(csv_path))
+                    continue  # Skip this duplicate
+                
+                a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
+                b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
+                c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
+                d = float(last.get(f"PT{pt_num} Coefficient 3", 0))
+                result[pt_num] = (a, b, c, d)
+        except Exception as e:
+            return result, f"Error loading {os.path.basename(csv_path)}: {str(e)}"
+    
+    # Build error message if duplicates found
+    if duplicates:
+        error_parts = ["Duplicate PT numbers found:"]
+        for pt_num, files in sorted(duplicates.items()):
+            error_parts.append(f"  PT{pt_num} appears in: {', '.join(files)}")
+        return result, "\n".join(error_parts)
+    
+    return result, None
 
 
 # Demo mode: fake UDP packets from separate module
@@ -483,6 +860,77 @@ class UDPReceiver(QtCore.QThread):
         self.status_update.emit("Stopped")
 
 
+# ---------------------- Debug dialog (C1, MA, raw values, network) ----------------------
+class SensorDebugDialog(QtWidgets.QDialog):
+    """Popup showing network stats, C1, MA, and psi for each connector."""
+    def __init__(self, parent: "SensorPlotWidget"):
+        super().__init__(parent)
+        self.plot_widget = parent
+        self.setWindowTitle("Sensor debug")
+        self.setMinimumWidth(320)
+        layout = QtWidgets.QVBoxLayout(self)
+        # Network statistics at top
+        net_group = QtWidgets.QGroupBox("Network")
+        net_layout = QtWidgets.QVBoxLayout()
+        self.packets_lbl = QtWidgets.QLabel("Packets: 0")
+        self.pps_lbl = QtWidgets.QLabel("Packets/sec: 0.0")
+        self.bytes_lbl = QtWidgets.QLabel("Bytes: 0 B")
+        self.bps_lbl = QtWidgets.QLabel("Bytes/sec: 0.0 B/s")
+        for w in (self.packets_lbl, self.pps_lbl, self.bytes_lbl, self.bps_lbl):
+            net_layout.addWidget(w)
+        net_group.setLayout(net_layout)
+        layout.addWidget(net_group)
+        # Sensor table
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Connector", "C (V)", "MA (V)", "psi"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        self.refresh_timer = QtCore.QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh)
+        self.refresh_timer.start(300)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        ns = self.plot_widget.network_stats
+        self.packets_lbl.setText(f"Packets: {ns['packets']}")
+        self.pps_lbl.setText(f"Packets/sec: {ns['pps']}")
+        self.bytes_lbl.setText(f"Bytes: {ns['bytes']}")
+        self.bps_lbl.setText(f"Bytes/sec: {ns['bps']}")
+
+        self.table.setRowCount(NUM_CONNECTORS)
+        for i in range(1, NUM_CONNECTORS + 1):
+            row = i - 1
+            if self.table.item(row, 0) is None:
+                self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"PT {i}"))
+            self.table.item(row, 0).setText(f"PT {i}")
+            dv = self.plot_widget.debug_values.get(i, {})
+            c = dv.get("current")
+            ma = dv.get("moving_avg")
+            psi = dv.get("psi")
+            self._set_cell(row, 1, f"{c:.4f}" if c is not None else "---")
+            self._set_cell(row, 2, f"{ma:.4f}" if ma is not None else "---")
+            self._set_cell(row, 3, f"{psi:.2f}" if psi is not None else "---")
+
+    def _set_cell(self, row: int, col: int, text: str):
+        item = self.table.item(row, col)
+        if item is None:
+            item = QtWidgets.QTableWidgetItem(text)
+            self.table.setItem(row, col, item)
+        else:
+            item.setText(text)
+
+    def closeEvent(self, event):
+        self.refresh_timer.stop()
+        super().closeEvent(event)
+
+
 # ---------------------- Sensor Plot Widget (reusable panel) ----------------------
 class SensorPlotWidget(QtWidgets.QWidget):
     """Reusable sensor/PT plotting panel. Used in SensorPlotWindow and CombinedMainWindow."""
@@ -504,7 +952,7 @@ class SensorPlotWidget(QtWidgets.QWidget):
         # Y-axis settings
         self.y_axis_auto_scale = True  # Auto-scale Y-axis by default
         self.y_axis_min = 0.0  # Minimum Y-axis value (psi)
-        self.y_axis_max = 200.0  # Maximum Y-axis value (psi)
+        self.y_axis_max = 700.0  # Maximum Y-axis value (psi)
         
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}  # Voltage data for statistics display
@@ -516,10 +964,19 @@ class SensorPlotWidget(QtWidgets.QWidget):
         # Statistics
         self.stats_start_time = time.time()
         
-        self.pt_calibration = load_pt_calibration(PT_CALIBRATION_CSV)
+        self.pt_calibration, self.pt_calibration_error = load_pt_calibration(CONFIG.get_pt_calibration_csv_paths())
+        if self.pt_calibration_error:
+            print(f"PT Calibration Error: {self.pt_calibration_error}")
         
-        # Sensor labels (connector_id -> label string)
+        # Reference to main window for event tracking (set by main window)
+        self.main_window_ref = None
+        
+        # Sensor labels (connector_id -> label string); all from config sensor_roles (role name = label)
         self.sensor_labels = {i: CONFIG.get_sensor_label(i) for i in range(1, NUM_CONNECTORS + 1)}
+        # Debug values for popup: connector_id -> {'current': float, 'moving_avg': float, 'psi': float|None}
+        self.debug_values: Dict[int, Dict] = {}
+        # Network stats for debug popup
+        self.network_stats = {"packets": "0", "pps": "0.0", "bytes": "0 B", "bps": "0.0 B/s"}
         
         # Load display settings from Config
         disp = CONFIG.config["display"]
@@ -529,6 +986,9 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.y_axis_min = disp["y_axis_min"]
         self.y_axis_max = disp["y_axis_max"]
         self.y_axis_auto_scale = disp["y_axis_autoscale"]
+        self.graph_moving_avg_samples = disp.get("graph_ma_samples", self.graph_moving_avg_samples)
+        self.display_moving_avg_samples = disp.get("display_ma_samples", self.display_moving_avg_samples)
+        self.only_show_pt_with_roles = disp.get("only_show_pt_with_roles", False)
         self.filter_source_ip = CONFIG.config["network"]["sensor_ip_filter"]
         
         # Demo mode: synthetic PT data via UDP to localhost (same decode path as real hardware)
@@ -554,18 +1014,48 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.stats_timer.timeout.connect(self.update_statistics)
         self.stats_timer.start(500)  # Update stats every 500ms
     
+    def format_label_two_rows(self, text: str) -> str:
+        """Format label text to always be two words, one per row.
+        Splits text into words and ensures exactly two words on separate lines."""
+        if not text:
+            return ""
+        words = text.strip().split()
+        if len(words) == 0:
+            return ""
+        elif len(words) == 1:
+            # If only one word, try to split it (e.g., "PT1" -> "PT" and "1")
+            word = words[0]
+            # Try to split on number boundary (e.g., "PT1" -> ["PT", "1"])
+            parts = re.split(r'(\d+)', word)
+            parts = [p for p in parts if p]  # Remove empty strings
+            if len(parts) >= 2:
+                return f"{parts[0]}\n{''.join(parts[1:])}"
+            else:
+                # Can't split, just put it on first row with empty second row
+                return f"{word}\n "
+        elif len(words) >= 2:
+            # Take first two words, one per row
+            return f"{words[0]}\n{words[1]}"
+        return text
+    
     def on_sensor_label_changed(self, connector_id: int, text: str):
-        """Handle sensor label text change"""
-        CONFIG.set_sensor_label(connector_id, text)
-        self.sensor_labels[connector_id] = text  # Update local cache
+        """Update local sensor label and plot legend (config is written via set_sensor_role in settings)."""
+        self.sensor_labels[connector_id] = text
         
-        # Update dashoard label widget if it exists
-        if connector_id in self.sensor_label_inputs:
-             self.sensor_label_inputs[connector_id].setText(text)
-             
+        # Update the under-graph name label
+        if connector_id in self.under_graph_name_labels:
+            display_name = text if text else f"PT {connector_id}"
+            formatted_name = self.format_label_two_rows(display_name)
+            self.under_graph_name_labels[connector_id].setText(formatted_name)
+        
         # Update the plot legend if this sensor has a plot
         if connector_id in self.sensor_plots:
             self.update_plot_legend(connector_id)
+        
+        # If "only show PTs with roles" is enabled, update visibility immediately
+        if self.only_show_pt_with_roles:
+            self.update_plots()
+            self.update_statistics()
     
     def update_plot_legend(self, connector_id: int):
         """Update the legend for a specific sensor plot"""
@@ -610,140 +1100,75 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.auto_scale_checkbox.setStyleSheet("padding: 5px;")
         top_panel.addWidget(self.auto_scale_checkbox)
         
+        # CSV export buttons
+        btn_save_pressures = QtWidgets.QPushButton("Save Pressures CSV")
+        btn_save_pressures.clicked.connect(self.save_pressures_csv)
+        btn_save_pressures.setStyleSheet("padding: 5px;")
+        top_panel.addWidget(btn_save_pressures)
+        
+        btn_save_events = QtWidgets.QPushButton("Save Events CSV")
+        btn_save_events.clicked.connect(self.save_events_csv)
+        btn_save_events.setStyleSheet("padding: 5px;")
+        top_panel.addWidget(btn_save_events)
+        
         layout.addLayout(top_panel)
         
-        # Horizontal layout for plot and statistics
+        # Horizontal layout: left = plot + under-graph values, right = stats
         plot_stats_layout = QtWidgets.QHBoxLayout()
+        
+        left_column = QtWidgets.QWidget()
+        left_column_layout = QtWidgets.QVBoxLayout(left_column)
+        left_column_layout.setContentsMargins(0, 0, 0, 0)
         
         # Plot widget
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground('k')  # Black background
-        plot_stats_layout.addWidget(self.plot_widget, 1)  # Takes most of the space
+        left_column_layout.addWidget(self.plot_widget, 1)
         
-        # Statistics panel on the right
-        stats_widget = QtWidgets.QWidget()
-        stats_main_layout = QtWidgets.QVBoxLayout(stats_widget)
-        stats_main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Network statistics group
-        network_stats_group = QtWidgets.QGroupBox("Network")
-        network_stats_layout = QtWidgets.QVBoxLayout()
-        
-        self.packets_label = QtWidgets.QLabel("Packets: 0")
-        self.pps_label = QtWidgets.QLabel("Packets/sec: 0.0")
-        self.bytes_label = QtWidgets.QLabel("Bytes: 0")
-        self.bps_label = QtWidgets.QLabel("Bytes/sec: 0.0")
-        
-        # Increase font size for statistics
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        self.packets_label.setFont(font)
-        self.pps_label.setFont(font)
-        self.bytes_label.setFont(font)
-        self.bps_label.setFont(font)
-        
-        network_stats_layout.addWidget(self.packets_label)
-        network_stats_layout.addWidget(self.pps_label)
-        network_stats_layout.addWidget(self.bytes_label)
-        network_stats_layout.addWidget(self.bps_label)
-        network_stats_group.setLayout(network_stats_layout)
-        stats_main_layout.addWidget(network_stats_group)
-        
-        # Connector statistics group with scrollable area
-        connector_stats_group = QtWidgets.QGroupBox("Sensors")
-        connector_stats_group_layout = QtWidgets.QVBoxLayout()
-        
-        # Moving average controls
-        ma_group = QtWidgets.QGroupBox("Moving Average")
-        ma_group_layout = QtWidgets.QVBoxLayout()
-        
-        # Graph moving average
-        graph_ma_layout = QtWidgets.QHBoxLayout()
-        graph_ma_layout.addWidget(QtWidgets.QLabel("Graph:"))
-        self.graph_ma_spinbox = QtWidgets.QSpinBox()
-        self.graph_ma_spinbox.setMinimum(1)
-        self.graph_ma_spinbox.setMaximum(100)
-        self.graph_ma_spinbox.setValue(self.graph_moving_avg_samples)
-        self.graph_ma_spinbox.setSuffix(" samples")
-        self.graph_ma_spinbox.valueChanged.connect(self.on_graph_moving_avg_changed)
-        graph_ma_layout.addWidget(self.graph_ma_spinbox)
-        ma_group_layout.addLayout(graph_ma_layout)
-        
-        # Display moving average
-        display_ma_layout = QtWidgets.QHBoxLayout()
-        display_ma_layout.addWidget(QtWidgets.QLabel("Display:"))
-        self.display_ma_spinbox = QtWidgets.QSpinBox()
-        self.display_ma_spinbox.setMinimum(1)
-        self.display_ma_spinbox.setMaximum(100)
-        self.display_ma_spinbox.setValue(self.display_moving_avg_samples)
-        self.display_ma_spinbox.setSuffix(" samples")
-        self.display_ma_spinbox.valueChanged.connect(self.on_display_moving_avg_changed)
-        display_ma_layout.addWidget(self.display_ma_spinbox)
-        ma_group_layout.addLayout(display_ma_layout)
-        
-        ma_group.setLayout(ma_group_layout)
-        connector_stats_group_layout.addWidget(ma_group)
-        
-        # Scrollable area for connector values
-        connector_scroll = QtWidgets.QScrollArea()
-        connector_scroll.setWidgetResizable(True)
-        connector_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
-        connector_stats_content = QtWidgets.QWidget()
-        connector_stats_layout = QtWidgets.QVBoxLayout(connector_stats_content)
-        connector_stats_layout.setSpacing(5)
-        
-        # Create labels and plot toggles for each connector
-        self.connector_labels = {}
-        self.connector_toggles: Dict[int, QtWidgets.QCheckBox] = {}
-        self.sensor_label_inputs: Dict[int, QtWidgets.QLabel] = {}
-        small_font = QtGui.QFont()
-        small_font.setPointSize(9)
-        tiny_font = QtGui.QFont()
-        tiny_font.setPointSize(8)
-        
+        # Under-graph strip: label on top, value below (large and easy to read)
+        under_graph_widget = QtWidgets.QWidget()
+        under_graph_layout = QtWidgets.QHBoxLayout(under_graph_widget)
+        under_graph_layout.setContentsMargins(8, 8, 8, 8)
+        under_graph_layout.setSpacing(16)
+        label_font = QtGui.QFont()
+        label_font.setPointSize(10)
+        value_font = QtGui.QFont()
+        value_font.setPointSize(16)
+        value_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        self.under_graph_labels: Dict[int, QtWidgets.QLabel] = {}  # value label only
+        self.under_graph_name_labels: Dict[int, QtWidgets.QLabel] = {}  # name label (PT role)
+        self.under_graph_containers: Dict[int, QtWidgets.QWidget] = {}  # cell to show/hide
         for i in range(1, NUM_CONNECTORS + 1):
-            # Add label input field (only visible for calibrated sensors)
-            if i in self.pt_calibration:
-                # Replaced editable QLineEdit with read-only QLabel as requested
-                label_input = QtWidgets.QLabel()
-                label_input.setText(self.sensor_labels.get(i, ""))
-                label_input.setFont(tiny_font)
-                label_input.setStyleSheet("padding: 2px; margin-bottom: 2px; color: #AAAAAA;")
-                
-                connector_stats_layout.addWidget(label_input)
-                self.sensor_label_inputs[i] = label_input
-            
-            # Data display row
-            row = QtWidgets.QHBoxLayout()
-            cb = QtWidgets.QCheckBox()
-            cb.setChecked(True)
-            cb.stateChanged.connect(lambda s, cid=i: self._on_plot_toggle(cid, s))
-            self.connector_toggles[i] = cb
-            row.addWidget(cb)
-            label = QtWidgets.QLabel(f"C{i}: --- V")
-            label.setFont(small_font)
-            label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            cell = QtWidgets.QWidget()
+            cell_layout = QtWidgets.QVBoxLayout(cell)
+            cell_layout.setContentsMargins(6, 4, 6, 4)
+            cell_layout.setSpacing(2)
+            label_text = self.sensor_labels.get(i, f"PT {i}")
+            formatted_label = self.format_label_two_rows(label_text)
+            name_lbl = QtWidgets.QLabel(formatted_label)
+            name_lbl.setFont(label_font)
+            name_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setWordWrap(False)
             color_idx = i % len(SENSOR_COLORS)
-            color = SENSOR_COLORS[color_idx]
-            label.setStyleSheet(f"color: rgb{color}; padding: 2px;")
-            row.addWidget(label)
-            connector_stats_layout.addLayout(row)
-            self.connector_labels[i] = label
-            
-            # Add spacing between sensors
-            if i < NUM_CONNECTORS:
-                connector_stats_layout.addSpacing(5)
+            color_style = f"color: rgb{SENSOR_COLORS[color_idx]};"
+            name_lbl.setStyleSheet(color_style)
+            name_lbl.setMinimumWidth(72)
+            cell_layout.addWidget(name_lbl)
+            value_lbl = QtWidgets.QLabel("---")
+            value_lbl.setFont(value_font)
+            value_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            value_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            value_lbl.setStyleSheet(color_style)
+            value_lbl.setMinimumWidth(72)
+            cell_layout.addWidget(value_lbl)
+            under_graph_layout.addWidget(cell)
+            self.under_graph_containers[i] = cell
+            self.under_graph_name_labels[i] = name_lbl
+            self.under_graph_labels[i] = value_lbl
+        under_graph_layout.addStretch()
+        left_column_layout.addWidget(under_graph_widget)
         
-        connector_stats_layout.addStretch()  # Push connectors to top
-        connector_scroll.setWidget(connector_stats_content)
-        connector_stats_group_layout.addWidget(connector_scroll)
-        connector_stats_group.setLayout(connector_stats_group_layout)
-        stats_main_layout.addWidget(connector_stats_group, 1)
-        
-        stats_widget.setFixedWidth(250)  # Fixed width for stats panel
-        plot_stats_layout.addWidget(stats_widget)
-        
+        plot_stats_layout.addWidget(left_column, 1)
         layout.addLayout(plot_stats_layout, 1)
         
         # Create initial plot
@@ -756,7 +1181,8 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.plot_item.setLabel('left', 'Pressure (psi)', color='w')
         self.plot_item.setLabel('bottom', 'Time (seconds)', color='w')
         
-        self.plot_item.addLegend()
+        # Legend removed from pressure display graph
+        self.legend = None
         # Show grid with white/gray lines for visibility on black background
         self.plot_item.showGrid(x=True, y=True, alpha=0.5)
         # Set grid color to light gray/white
@@ -781,17 +1207,12 @@ class SensorPlotWidget(QtWidgets.QWidget):
         except AttributeError:
             pass
         
-        # Set axis line and text colors to white
-        left_axis.setPen('w')
-        bottom_axis.setPen('w')
+        # Set axis line and text colors to white; thin pen so gridlines (e.g. every 2s) are thinner
+        thin_white = pg.mkPen('w', width=0.5)
+        left_axis.setPen(thin_white)
+        bottom_axis.setPen(thin_white)
         left_axis.setTextPen('w')
         bottom_axis.setTextPen('w')
-        
-        # Legend - make it visible on black background with white text
-        self.legend = self.plot_item.legend
-        if self.legend:
-            self.legend.setBrush(pg.mkBrush('k'))  # Black background for legend
-            self.legend.setPen(pg.mkPen('w'))  # White border
         
         # Pre-initialize plots for all 10 connectors
         self.init_connector_plots()
@@ -806,10 +1227,35 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 self.sensor_psi_data[connector_id] = deque(maxlen=MAX_POINTS)
                 self.add_sensor_plot(connector_id)
     
+    def reload_pt_calibration(self):
+        """Reload PT calibration from config paths (e.g. after user changes CSV in settings)."""
+        self.pt_calibration, self.pt_calibration_error = load_pt_calibration(CONFIG.get_pt_calibration_csv_paths())
+        if self.pt_calibration_error:
+            print(f"PT Calibration Error: {self.pt_calibration_error}")
+            # Show error in GUI if we have a reference to main window
+            if self.main_window_ref:
+                QtWidgets.QMessageBox.warning(
+                    self.main_window_ref,
+                    "PT Calibration Error",
+                    self.pt_calibration_error
+                )
+        for connector_id in range(1, NUM_CONNECTORS + 1):
+            if connector_id in self.pt_calibration and connector_id not in self.sensor_psi_data:
+                self.sensor_psi_data[connector_id] = deque(maxlen=MAX_POINTS)
+                self.add_sensor_plot(connector_id)
+        self.update_plots()
+        self.update_statistics()
+    
     def _on_plot_toggle(self, connector_id: int, state):
         self.plot_enabled[connector_id] = bool(state)
-    
-    
+        if connector_id in self.under_graph_containers:
+            self.under_graph_containers[connector_id].setVisible(bool(state))
+
+    def open_debug_menu(self):
+        """Open the debug popup showing C1, MA, psi per connector."""
+        dlg = SensorDebugDialog(self)
+        dlg.exec()
+
     def on_auto_scale_toggled(self, state):
         """Handle auto-scale Y-axis toggle"""
         self.y_axis_auto_scale = bool(state)
@@ -955,6 +1401,8 @@ class SensorPlotWidget(QtWidgets.QWidget):
             packet_type=PacketType.SENSOR_DATA,
             version=DIABLO_COMMS_VERSION,
             max_packet_size=MAX_PACKET_SIZE,
+            psi_min=0.0,
+            psi_max=700.0,
         )
         if packet and self.demo_send_socket is not None:
             try:
@@ -1005,6 +1453,11 @@ class SensorPlotWidget(QtWidgets.QWidget):
             if sensor_id not in self.sensor_plots:
                 continue
             enabled = self.plot_enabled.get(sensor_id, True)
+            # If "only show PTs with roles" is enabled, hide PTs without names
+            if enabled and self.only_show_pt_with_roles:
+                pt_label = self.sensor_labels.get(sensor_id, "")
+                if not pt_label or pt_label.strip() == "":
+                    enabled = False
             self.sensor_plots[sensor_id].setVisible(enabled)
             if not enabled:
                 continue
@@ -1059,61 +1512,177 @@ class SensorPlotWidget(QtWidgets.QWidget):
             return
         
         stats = self.receiver.get_stats()
-        
-        self.packets_label.setText(f"Packets: {stats['packets']}")
-        self.pps_label.setText(f"Packets/sec: {stats['packets_per_sec']:.2f}")
-        
-        # Format bytes
-        bytes_val = stats['bytes']
+        self.network_stats["packets"] = str(stats["packets"])
+        self.network_stats["pps"] = f"{stats['packets_per_sec']:.2f}"
+        bytes_val = stats["bytes"]
         if bytes_val < 1024:
-            bytes_str = f"{bytes_val} B"
+            self.network_stats["bytes"] = f"{bytes_val} B"
         elif bytes_val < 1024 * 1024:
-            bytes_str = f"{bytes_val / 1024:.2f} KB"
+            self.network_stats["bytes"] = f"{bytes_val / 1024:.2f} KB"
         else:
-            bytes_str = f"{bytes_val / (1024 * 1024):.2f} MB"
-        self.bytes_label.setText(f"Bytes: {bytes_str}")
-        
-        # Format bytes per second
-        bps = stats['bytes_per_sec']
+            self.network_stats["bytes"] = f"{bytes_val / (1024 * 1024):.2f} MB"
+        bps = stats["bytes_per_sec"]
         if bps < 1024:
-            bps_str = f"{bps:.2f} B/s"
+            self.network_stats["bps"] = f"{bps:.2f} B/s"
         elif bps < 1024 * 1024:
-            bps_str = f"{bps / 1024:.2f} KB/s"
+            self.network_stats["bps"] = f"{bps / 1024:.2f} KB/s"
         else:
-            bps_str = f"{bps / (1024 * 1024):.2f} MB/s"
-        self.bps_label.setText(f"Bytes/sec: {bps_str}")
-        
-        # Update per-connector statistics
+            self.network_stats["bps"] = f"{bps / (1024 * 1024):.2f} MB/s"
+
+        # Update per-connector: under-graph display value and debug_values for popup
         for connector_id in range(1, NUM_CONNECTORS + 1):
+            display_text = "---"
+            self.debug_values[connector_id] = {"current": None, "moving_avg": None, "psi": None}
             if connector_id in self.sensor_data and len(self.sensor_data[connector_id]) > 0:
-                # Get latest values
                 values = [v for t, v in self.sensor_data[connector_id]]
                 if values:
                     current = values[-1]
-                    
-                    # Calculate moving average over last N samples for display
                     n_samples = min(self.display_moving_avg_samples, len(values))
                     moving_avg = sum(values[-n_samples:]) / n_samples
-                    
-                    text = f"C{connector_id}: {current:.4f} V<br/>  MA: {moving_avg:.4f} V"
-                    # Show psi for PTs when calibration is loaded (larger font)
-                    if connector_id in self.pt_calibration:
-                        # Get ADC code values for pressure calculation
-                        if connector_id in self.sensor_adc_codes and len(self.sensor_adc_codes[connector_id]) > 0:
-                            adc_values = [code for t, code in self.sensor_adc_codes[connector_id]]
-                            n_samples_adc = min(self.display_moving_avg_samples, len(adc_values))
-                            moving_avg_adc = sum(adc_values[-n_samples_adc:]) / n_samples_adc
-                            
-                            a, b, c, d = self.pt_calibration[connector_id]
-                            psi = calculate_pressure(moving_avg_adc, a, b, c, d)
-                            text += f"<br/><span style='font-size: 16pt; font-weight: bold'>{psi:.2f} psi</span>"
-                    self.connector_labels[connector_id].setText(text)
-                else:
-                    self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
-            else:
-                self.connector_labels[connector_id].setText(f"C{connector_id}: --- V")
+                    self.debug_values[connector_id]["current"] = current
+                    self.debug_values[connector_id]["moving_avg"] = moving_avg
+                    psi_val = None
+                    if connector_id in self.pt_calibration and connector_id in self.sensor_adc_codes and len(self.sensor_adc_codes[connector_id]) > 0:
+                        adc_values = [code for t, code in self.sensor_adc_codes[connector_id]]
+                        n_samples_adc = min(self.display_moving_avg_samples, len(adc_values))
+                        moving_avg_adc = sum(adc_values[-n_samples_adc:]) / n_samples_adc
+                        a, b, c, d = self.pt_calibration[connector_id]
+                        psi_val = calculate_pressure(moving_avg_adc, a, b, c, d)
+                        self.debug_values[connector_id]["psi"] = psi_val
+                        display_text = f"<span style='font-size:16pt; font-weight:600'>{psi_val:.2f}</span> <span style='font-size:8pt'>psi</span>"
+                    else:
+                        display_text = f"<span style='font-size:16pt; font-weight:600'>{moving_avg:.4f}</span> <span style='font-size:8pt'>V</span>"
+            if connector_id in self.under_graph_labels:
+                enabled = self.plot_enabled.get(connector_id, True)
+                # If "only show PTs with roles" is enabled, hide PTs without names
+                if enabled and self.only_show_pt_with_roles:
+                    pt_label = self.sensor_labels.get(connector_id, "")
+                    if not pt_label or pt_label.strip() == "":
+                        enabled = False
+                if connector_id in self.under_graph_containers:
+                    self.under_graph_containers[connector_id].setVisible(enabled)
+                if enabled:
+                    self.under_graph_labels[connector_id].setText(display_text)
     
-
+    def save_pressures_csv(self):
+        """Save pressure data to CSV file, respecting only_show_pt_with_roles setting."""
+        # Check if we have any pressure data
+        if not self.sensor_psi_data:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No pressure data available to export.")
+            return
+        
+        # Filter sensors based on settings
+        sensors_to_save = []
+        for sensor_id in sorted(self.sensor_psi_data.keys()):
+            if self.only_show_pt_with_roles:
+                # Only include sensors with roles (non-empty labels)
+                label = self.sensor_labels.get(sensor_id, "")
+                if label and label.strip():
+                    sensors_to_save.append(sensor_id)
+            else:
+                # Include all sensors with pressure data
+                sensors_to_save.append(sensor_id)
+        
+        if not sensors_to_save:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No sensors with roles available to export.")
+            return
+        
+        # Generate default filename with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        default_filename = f"pressures_{timestamp}.csv"
+        
+        # Open file dialog
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Pressures CSV File",
+            default_filename,
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Write header: Time (s), then sensor labels
+                header = ["Time (s)"]
+                for sensor_id in sensors_to_save:
+                    label = self.sensor_labels.get(sensor_id, "")
+                    if label:
+                        header.append(f"PT{sensor_id}: {label} (psi)")
+                    else:
+                        header.append(f"PT{sensor_id} (psi)")
+                writer.writerow(header)
+                
+                # Collect all unique timestamps across selected sensors
+                all_times = set()
+                for sensor_id in sensors_to_save:
+                    for t, _ in self.sensor_psi_data[sensor_id]:
+                        all_times.add(t)
+                
+                if not all_times:
+                    QtWidgets.QMessageBox.warning(self, "No Data", "No timestamp data available.")
+                    return
+                
+                # Write data row by row
+                for t in sorted(all_times):
+                    row = [f"{t:.6f}"]
+                    for sensor_id in sensors_to_save:
+                        # Find the pressure value at this timestamp for this sensor
+                        val = ""
+                        for ts, psi in self.sensor_psi_data[sensor_id]:
+                            if ts == t:
+                                val = f"{psi:.6f}"
+                                break
+                        row.append(val)
+                    writer.writerow(row)
+            
+            QtWidgets.QMessageBox.information(self, "Success", f"Saved pressures CSV to {filename}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"CSV save error: {e}")
+    
+    def save_events_csv(self):
+        """Save events (mode button clicks and actuator state changes) to CSV file."""
+        if not self.main_window_ref:
+            QtWidgets.QMessageBox.warning(self, "Error", "Main window reference not available.")
+            return
+        
+        events = self.main_window_ref.get_event_log()
+        if not events:
+            QtWidgets.QMessageBox.warning(self, "No Data", "No events available to export.")
+            return
+        
+        # Generate default filename with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        default_filename = f"events_{timestamp}.csv"
+        
+        # Open file dialog
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Events CSV File",
+            default_filename,
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Write header
+                writer.writerow(["Time (s)", "Event Type", "Details"])
+                
+                # Write events
+                for event_time, event_type, details in events:
+                    writer.writerow([f"{event_time:.6f}", event_type, details])
+            
+            QtWidgets.QMessageBox.information(self, "Success", f"Saved events CSV to {filename}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"CSV save error: {e}")
 
 
 # ---------------------- Sensor Plot Window (standalone) ----------------------
@@ -1144,8 +1713,18 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         self.device_port = CONFIG.config["network"]["actuator_port"]
         
         # Actuator state tracking (1-indexed: 1-10)
-        # 0 = OFF, 1 = ON
+        # GUI state: 0 = CLOSED, 1 = OPEN
         self.actuator_states = [0] * NUM_ACTUATORS
+        
+        # Actuator NC/NO type mapping (1-indexed: 1-10)
+        # Maps actuator ID to 'NC' or 'NO'
+        self.actuator_types = {i: CONFIG.get_actuator_type_by_id(i) for i in range(1, NUM_ACTUATORS + 1)}
+        
+        # Reference to main window for event tracking (set by main window)
+        self.main_window_ref = None
+        
+        # Manual control lock: True = manual control enabled (DEBUG button), False = locked
+        self.manual_control_enabled = False  # Default to False (locked) on startup
         
         # Voltage readings (0-indexed: 0-9, maps to actuator 1-10)
         # Store as voltage in Volts
@@ -1153,6 +1732,10 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         
         # Actuator labels (1-indexed: 1-10)
         self.actuator_labels = {i: CONFIG.get_actuator_label(i) for i in range(1, NUM_ACTUATORS + 1)}
+        
+        # Load display settings from Config
+        disp = CONFIG.config["display"]
+        self.only_show_actuators_with_roles = disp.get("only_show_actuators_with_roles", False)
         
         # UDP socket for sending commands
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1168,36 +1751,17 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         self.update_timer.timeout.connect(self.update_current_display)
         self.update_timer.start(100)  # Update every 100ms
     
-
-    
-        self.command_sock = None
-    
-    def on_label_changed(self, actuator_id: int, text: str):
-        """Handle label text change (internal or external)"""
-        CONFIG.set_actuator_label(actuator_id, text)
-        self.actuator_labels[actuator_id] = text
-        self.update_label_display(actuator_id, text)
-    
     def init_ui(self):
         """Initialize the user interface"""
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Top panel with status
-        top_panel = QtWidgets.QHBoxLayout()
-        
-        self.status_label = QtWidgets.QLabel("Ready")
-        self.status_label.setStyleSheet("font-weight: bold; padding: 5px;")
-        top_panel.addWidget(self.status_label)
-        
-        top_panel.addStretch()
-        
-        layout.addLayout(top_panel)
+        # Top panel removed - no status label needed
         
         # Main content area with actuators in a grid: 2 columns x 5 rows
-        grid_container = QtWidgets.QWidget()
-        grid_layout = QtWidgets.QGridLayout(grid_container)
-        grid_layout.setSpacing(10)
+        self.grid_container = QtWidgets.QWidget()
+        self.grid_layout = QtWidgets.QGridLayout(self.grid_container)
+        self.grid_layout.setSpacing(5)
         
         # Create actuator controls in a 2x5 grid
         self.actuator_widgets = []
@@ -1212,25 +1776,28 @@ class ActuatorControlWidget(QtWidgets.QWidget):
             actuator_frame = QtWidgets.QFrame()
             actuator_frame.setFrameShape(QtWidgets.QFrame.Shape.Box)
             actuator_frame.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-            actuator_frame.setStyleSheet("padding: 10px; margin: 5px;")
+            actuator_frame.setStyleSheet("padding: 5px 8px 8px 8px; margin: 3px; background-color: #353535;")
             
             actuator_layout = QtWidgets.QVBoxLayout(actuator_frame)
+            actuator_layout.setContentsMargins(0, 0, 0, 0)
+            actuator_layout.setSpacing(2)
             
             # Actuator ID label
             # If label exists, show label. Else show "Actuator {id}"
             label_text = self.actuator_labels.get(actuator_id, "") or f"Actuator {actuator_id}"
             id_label = QtWidgets.QLabel(label_text)
             id_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            id_label.setStyleSheet("font-weight: bold; font-size: 12pt; padding: 5px;")
+            id_label.setMinimumHeight(25)
+            id_label.setStyleSheet("font-weight: bold; font-size: 12pt; padding: 2px 5px; color: white; background-color: transparent;")
             actuator_layout.addWidget(id_label)
             
             # Button container
             button_container = QtWidgets.QHBoxLayout()
             button_container.setSpacing(5)
             
-            # ON button
-            on_btn = QtWidgets.QPushButton("ON")
-            on_btn.setMinimumHeight(40)
+            # OPEN button (2px border so layout matches selected state and text doesn't shift)
+            on_btn = QtWidgets.QPushButton("OPEN")
+            on_btn.setMinimumHeight(35)
             bg_color = self.palette().color(QtGui.QPalette.ColorRole.Window).name()
             on_btn.setStyleSheet(f"""
                 QPushButton {{
@@ -1238,15 +1805,15 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                     font-weight: bold;
                     background-color: {bg_color};
                     color: #FFFFFF;
-                    border: none;
+                    border: 2px solid {bg_color};
                     border-radius: 5px;
                     padding: 5px;
                 }}
             """)
             on_btn.clicked.connect(lambda checked=False, aid=actuator_id: self.set_actuator_state(aid, 1))
             
-            # OFF button
-            off_btn = QtWidgets.QPushButton("OFF")
+            # CLOSED button (2px border so layout matches selected state and text doesn't shift)
+            off_btn = QtWidgets.QPushButton("CLOSED")
             off_btn.setMinimumHeight(40)
             off_btn.setStyleSheet(f"""
                 QPushButton {{
@@ -1254,7 +1821,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                     font-weight: bold;
                     background-color: {bg_color};
                     color: #FFFFFF;
-                    border: none;
+                    border: 2px solid {bg_color};
                     border-radius: 5px;
                     padding: 5px;
                 }}
@@ -1266,13 +1833,15 @@ class ActuatorControlWidget(QtWidgets.QWidget):
             actuator_layout.addLayout(button_container)
             
             # Voltage reading label
-            voltage_label = QtWidgets.QLabel("Voltage: 0.000 V")
+            voltage_label = QtWidgets.QLabel("0.000 V")
             voltage_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            voltage_label.setStyleSheet("font-size: 10pt; padding: 5px;")
+            voltage_label.setWordWrap(True)
+            voltage_label.setMinimumHeight(15)
+            voltage_label.setStyleSheet("font-size: 7pt; padding: 1px 3px; color: white; background-color: transparent;")
             actuator_layout.addWidget(voltage_label)
             
             # Add to grid
-            grid_layout.addWidget(actuator_frame, row, col)
+            self.grid_layout.addWidget(actuator_frame, row, col)
             
             # Store widget references
             self.actuator_widgets.append({
@@ -1283,11 +1852,28 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                 'id_label': id_label
             })
         
-        layout.addWidget(grid_container, 1)
+        layout.addWidget(self.grid_container, 1)
         
-        # Initialize all actuators to OFF state (highlight OFF buttons)
-        for i in range(NUM_ACTUATORS):
-            self.update_button_highlight(i, 0)
+        # Initialize actuators based on NC/NO type
+        # NO actuators start OPEN (GUI state 1, hardware command 0)
+        # NC actuators start CLOSED (GUI state 0, hardware command 0)
+        # Note: We only set UI state during initialization, no hardware commands are sent
+        for actuator_id in range(1, NUM_ACTUATORS + 1):
+            actuator_type = self.actuator_types.get(actuator_id, 'NC')
+            array_idx = actuator_id - 1
+            if actuator_type == 'NO':
+                # NO actuators start OPEN (GUI state 1, hardware command 0)
+                self.actuator_states[array_idx] = 1
+                self.update_button_highlight(array_idx, 1)
+                # Don't send hardware command during initialization
+            else:
+                # NC actuators start CLOSED (GUI state 0, hardware command 0)
+                self.actuator_states[array_idx] = 0
+                self.update_button_highlight(array_idx, 0)
+                # Hardware command already 0, no need to send
+        
+        # Apply initial visibility based on setting
+        self.update_actuator_visibility()
 
     def update_label_display(self, actuator_id, text):
         """External method to update label display when changed in settings"""
@@ -1297,10 +1883,57 @@ class ActuatorControlWidget(QtWidgets.QWidget):
              self.actuator_widgets[idx]['id_label'].setText(new_text)
 
     def on_label_changed(self, actuator_id: int, text: str):
-        """Handle label text change (internal or external)"""
-        CONFIG.set_actuator_label(actuator_id, text)
+        """Update local actuator label and display (config is written via set_actuator_role in settings)."""
         self.actuator_labels[actuator_id] = text
         self.update_label_display(actuator_id, text)
+        # Update visibility if filtering is enabled
+        if self.only_show_actuators_with_roles:
+            self.update_actuator_visibility()
+    
+    def update_actuator_visibility(self):
+        """Update visibility of actuator widgets based on whether they have roles.
+        When filtering is enabled, reflow visible actuators in order: row1 vents, row2 press, row3 mains; col1 fuel, col2 lox."""
+        if self.only_show_actuators_with_roles:
+            # Remove all widgets from grid
+            for i in range(NUM_ACTUATORS):
+                widget = self.actuator_widgets[i]
+                self.grid_layout.removeWidget(widget['frame'])
+            
+            # Collect visible actuators in display order: vents (fuel, lox), press (fuel, lox), mains (fuel, lox)
+            visible_widgets = []
+            for role_name in ACTUATOR_DISPLAY_ORDER_WHEN_ROLES:
+                actuator_id = CONFIG.get_actuator_role(role_name)
+                if actuator_id and actuator_id > 0:
+                    array_idx = actuator_id - 1
+                    if 0 <= array_idx < len(self.actuator_widgets):
+                        widget = self.actuator_widgets[array_idx]
+                        visible_widgets.append(widget)
+                        widget['frame'].setVisible(True)
+            # Hide any actuator not in the ordered list
+            for i in range(NUM_ACTUATORS):
+                widget = self.actuator_widgets[i]
+                if widget not in visible_widgets:
+                    widget['frame'].setVisible(False)
+            
+            # Re-add visible widgets in 2-column layout (col 0 = fuel, col 1 = lox)
+            for idx, widget in enumerate(visible_widgets):
+                row = idx // 2
+                col = idx % 2
+                self.grid_layout.addWidget(widget['frame'], row, col)
+        else:
+            # Show all actuators in their original positions
+            for i in range(NUM_ACTUATORS):
+                actuator_id = i + 1
+                widget = self.actuator_widgets[i]
+                widget['frame'].setVisible(True)
+            
+            # Restore original grid positions
+            for i in range(NUM_ACTUATORS):
+                widget = self.actuator_widgets[i]
+                self.grid_layout.removeWidget(widget['frame'])
+                row = i // 2
+                col = i % 2
+                self.grid_layout.addWidget(widget['frame'], row, col)
     
     def on_status_update(self, message: str):
         """Handle status updates from receiver thread"""
@@ -1325,53 +1958,103 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                     self.voltage_readings[array_idx] = voltage
     
     def update_button_highlight(self, array_idx: int, actuator_state: int):
-        """Update button highlighting based on actuator state."""
+        """Update button highlighting based on actuator state. Selected OPEN = saturated green, selected CLOSED = saturated red."""
         widget = self.actuator_widgets[array_idx]
         bg_color = widget['frame'].palette().color(QtGui.QPalette.ColorRole.Window).name()
+        # Same 2px border as active state so text doesn't shift when toggling
         inactive_style = f"""
             QPushButton {{
                 font-size: 11pt;
                 font-weight: bold;
                 background-color: {bg_color};
                 color: #FFFFFF;
-                border: none;
+                border: 2px solid {bg_color};
                 border-radius: 5px;
                 padding: 5px;
             }}
         """
-        active_style = """
+        # Saturated green box for selected OPEN, saturated red box for selected CLOSED (only when selected)
+        active_open_style = """
             QPushButton {
                 font-size: 11pt;
                 font-weight: bold;
-                background-color: #FFFFFF;
-                color: #000000;
-                border: 2px solid #000000;
+                background-color: #008800;
+                color: #ffffff;
+                border: 2px solid #008800;
+                border-radius: 5px;
+                padding: 5px;
+            }
+        """
+        active_closed_style = """
+            QPushButton {
+                font-size: 11pt;
+                font-weight: bold;
+                background-color: #dc143c;
+                color: #ffffff;
+                border: 2px solid #dc143c;
                 border-radius: 5px;
                 padding: 5px;
             }
         """
         if actuator_state == 1:
-            widget['on_btn'].setStyleSheet(active_style)
+            widget['on_btn'].setStyleSheet(active_open_style)
             widget['off_btn'].setStyleSheet(inactive_style)
         else:
             widget['on_btn'].setStyleSheet(inactive_style)
-            widget['off_btn'].setStyleSheet(active_style)
+            widget['off_btn'].setStyleSheet(active_closed_style)
     
-    def set_actuator_state(self, actuator_id: int, actuator_state: int):
-        """Set actuator state and send command packet."""
+    def set_actuator_state(self, actuator_id: int, gui_state: int, force: bool = False):
+        """
+        Set actuator state and send command packet.
+        gui_state: 0 = CLOSED, 1 = OPEN (from GUI button)
+        force: If True, bypass manual control lock (used by state machine)
+        Converts to hardware command based on NC/NO type:
+        - NC: OPEN (1) -> hardware ON (1), CLOSED (0) -> hardware OFF (0)
+        - NO: OPEN (1) -> hardware OFF (0), CLOSED (0) -> hardware ON (1)
+        """
+        # If manual control is locked and this is a manual click (not forced), do nothing
+        if not self.manual_control_enabled and not force:
+            return
+        
         array_idx = actuator_id - 1
-        self.actuator_states[array_idx] = actuator_state
-        self.update_button_highlight(array_idx, actuator_state)
-        self.send_actuator_command(actuator_id, actuator_state)
+        old_state = self.actuator_states[array_idx]
+        self.actuator_states[array_idx] = gui_state
+        
+        # Convert GUI state to hardware command based on NC/NO type
+        actuator_type = self.actuator_types.get(actuator_id, 'NC')
+        if actuator_type == 'NO':
+            # NO: OPEN (1) -> hardware OFF (0), CLOSED (0) -> hardware ON (1)
+            hardware_command = 0 if gui_state == 1 else 1
+        else:
+            # NC: OPEN (1) -> hardware ON (1), CLOSED (0) -> hardware OFF (0)
+            hardware_command = gui_state
+        
+        self.update_button_highlight(array_idx, gui_state)
+        self.send_actuator_command(actuator_id, hardware_command)
+        
+        # Log actuator state change event
+        if self.main_window_ref and old_state != gui_state:
+            label = self.actuator_labels.get(actuator_id, "")
+            if label:
+                details = f"Actuator {actuator_id} ({label}): {'OPEN' if gui_state else 'CLOSED'}"
+            else:
+                details = f"Actuator {actuator_id}: {'OPEN' if gui_state else 'CLOSED'}"
+            self.main_window_ref.log_event("Actuator State Change", details)
     
-    def send_actuator_command(self, actuator_id: int, actuator_state: int):
-        """Send an actuator command packet to the device."""
+    def send_actuator_command(self, actuator_id: int, hardware_command: int):
+        """
+        Send an actuator command packet to the device.
+        hardware_command: 0 = OFF, 1 = ON (hardware level)
+        """
         try:
-            commands = [(actuator_id, actuator_state)]
+            commands = [(actuator_id, hardware_command)]
             packet = create_actuator_command_packet(commands)
             if len(packet) > 0:
                 self.command_sock.sendto(packet, (self.device_ip, self.device_port))
-                print(f"Sent command: Actuator {actuator_id} -> {'ON' if actuator_state else 'OFF'}")
+                # Get GUI state for logging
+                array_idx = actuator_id - 1
+                gui_state = self.actuator_states[array_idx]
+                print(f"Sent command: Actuator {actuator_id} -> {'OPEN' if gui_state else 'CLOSED'} (hardware: {'ON' if hardware_command else 'OFF'})")
             else:
                 print(f"Error: Failed to create packet for actuator {actuator_id}")
         except OSError as e:
@@ -1383,17 +2066,23 @@ class ActuatorControlWidget(QtWidgets.QWidget):
             else:
                 msg = f"Network error: [{err}] {e}"
             print(f"Error sending command: {e}")
-            self.status_label.setText(msg)
         except Exception as e:
             print(f"Error sending command: {e}")
-            self.status_label.setText(f"Error: {e}")
     
     def update_current_display(self):
         """Update the voltage reading display for all actuators"""
         for i in range(NUM_ACTUATORS):
             voltage = self.voltage_readings[i]
             widget = self.actuator_widgets[i]
-            widget['voltage_label'].setText(f"Voltage: {voltage:.3f} V")
+            widget['voltage_label'].setText(f"{voltage:.3f} V")
+    
+    def close_socket(self):
+        """Close the command socket"""
+        if self.command_sock:
+            try:
+                self.command_sock.close()
+            except:
+                pass
     
 
 
@@ -1401,19 +2090,54 @@ class ActuatorControlWidget(QtWidgets.QWidget):
 # ---------------------- Top Bar Widgets ----------------------
 class PressureBarWidget(QtWidgets.QWidget):
     """
-    Vertical bar gauge showing pressure relative to NOP and MEOP.
-    Range: 0 to 1.2 * MEOP
+    Vertical bar gauge: four dashed lines at 20%, 40%, 60%, 80% of bar height (global Y from parent).
+    Labels:
+    y80=POP, y60=MEOP, y40=NOP, y20=THRESH. Bar outline and fill are full height; fill is linear in pressure.
     """
-    def __init__(self, title: str, nop: float = 500.0, meop: float = 700.0, fixed_color: QtGui.QColor = None, parent=None):
+    TOP_MARGIN = 20
+    BOTTOM_GAP = 8       # space between bar and value box
+    VALUE_BOX_HEIGHT = 26
+    BOTTOM_CLEARANCE = 4
+    BOTTOM_MARGIN = BOTTOM_GAP + VALUE_BOX_HEIGHT + BOTTOM_CLEARANCE  # total bottom region (parent uses for bar extent)
+
+    def __init__(self, title: str, nop: float = 500.0, meop: float = 700.0, pop: float = 1000.0, thresh: float = None, fixed_color: QtGui.QColor = None, parent=None):
         super().__init__(parent)
         self.title = title
         self.nop = nop
         self.meop = meop
+        self.pop = pop
+        self.thresh = thresh if thresh is not None else (nop * 0.5)
+        self.scale_max = 1.25 * pop  # shared across bars
         self.fixed_color = fixed_color
         self.current_value = 0.0
-        self.setMinimumWidth(60)
+        # Global line Y positions in parent coordinates (set by TopBarWidget); None until set
+        self._line_y20_parent = None
+        self._line_y40_parent = None
+        self._line_y60_parent = None
+        self._line_y80_parent = None
+        self.setMinimumWidth(79)
+        self.setMaximumWidth(83)
         self.setMinimumHeight(100)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+
+    def set_global_line_ys(self, y20: float, y40: float, y60: float, y80: float):
+        """Set the four dashed-line Y positions in parent coordinates (same for all three bars)."""
+        self._line_y20_parent = y20
+        self._line_y40_parent = y40
+        self._line_y60_parent = y60
+        self._line_y80_parent = y80
+        self.update()
+
+    def set_limits(self, nop: float, meop: float, pop: float, thresh: float = None, scale_max: float = None):
+        """Update NOP, MEOP, POP, THRESH and optional shared scale_max; repaint."""
+        self.nop = nop
+        self.meop = meop
+        self.pop = pop
+        if thresh is not None:
+            self.thresh = thresh
+        if scale_max is not None:
+            self.scale_max = scale_max
+        self.update()
         
     def set_value(self, value: float):
         self.current_value = value
@@ -1423,122 +2147,653 @@ class PressureBarWidget(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         
-        # Geometry
+        # Geometry: bar on the left, label column on the right
         w = self.width()
         h = self.height()
-        
-        # Margins (room for text)
-        top_margin = 20
-        bottom_margin = 20
-        bar_w = w - 20
-        bar_x = 10
+        top_margin = self.TOP_MARGIN
+        bottom_margin = self.BOTTOM_MARGIN
+        left_margin = 5
+        label_width = 32
+        gap = 2
+        bar_w = w - left_margin - gap - label_width
+        bar_w = max(40, bar_w)
+        draw_w = max(28, int(bar_w * 0.85))  # bar width (slightly thinner than full slot)
+        bar_x = left_margin + (bar_w - draw_w) // 2  # center the bar
         bar_h = h - top_margin - bottom_margin
         bar_y = top_margin
-        
-        # Draw Title
+        bar_bottom_y = bar_y + bar_h
+        label_x = bar_x + draw_w + 4  # just to the right of the bar
+
+        # Draw Title centered above the bar
         painter.setPen(QtCore.Qt.GlobalColor.white)
-        painter.drawText(QtCore.QRect(0, 0, w, top_margin), QtCore.Qt.AlignmentFlag.AlignCenter, self.title)
-        
-        # Draw Background Bar
+        painter.drawText(QtCore.QRect(bar_x, 0, draw_w, top_margin), QtCore.Qt.AlignmentFlag.AlignCenter, self.title)
+
+        # Bar outline: full height
+        scale_max = max(self.scale_max, 1.0)
         painter.setPen(QtCore.Qt.GlobalColor.gray)
         painter.setBrush(QtGui.QColor(50, 50, 50))
-        painter.drawRect(bar_x, bar_y, bar_w, bar_h)
-        
-        # Scale calculation
-        max_val = 1.2 * self.meop
-        if max_val <= 0: max_val = 1.0
-        
-        # Draw Current Level
-        fill_ratio = min(max(self.current_value / max_val, 0.0), 1.0)
+        painter.drawRect(bar_x, bar_y, draw_w, bar_h)
+
+        # Fill height: piecewise mapping so fill aligns with reference lines (y20=THRESH, y40=NOP, y60=MEOP, y80=POP)
+        # 0..THRESH -> 0..20%, THRESH..NOP -> 20..40%, NOP..MEOP -> 40..60%, MEOP..POP -> 60..80%, >=POP -> 80%
+        v = max(0.0, self.current_value)
+        thresh, nop, meop, pop = self.thresh, self.nop, self.meop, self.pop
+        if v <= thresh:
+            segment = (v / thresh) * 0.20 if thresh > 0 else 0.0
+        elif v <= nop:
+            segment = 0.20 + (v - thresh) / (nop - thresh) * 0.20 if nop > thresh else 0.20
+        elif v <= meop:
+            segment = 0.40 + (v - nop) / (meop - nop) * 0.20 if meop > nop else 0.40
+        elif v <= pop:
+            segment = 0.60 + (v - meop) / (pop - meop) * 0.20 if pop > meop else 0.60
+        else:
+            segment = 0.80  # cap at 80% (top reference line)
+        fill_ratio = min(max(segment, 0.0), 1.0)
         fill_h = int(fill_ratio * bar_h)
-        fill_y = bar_y + bar_h - fill_h
-        
-        # Color based on value
+        fill_y = bar_bottom_y - fill_h
+
+        # Color based on value (vibrant pastels when no fixed_color)
         if self.fixed_color:
             painter.setBrush(self.fixed_color)
         else:
             if self.current_value > self.meop:
-                painter.setBrush(QtGui.QColor(255, 0, 0)) # Red
+                painter.setBrush(QtGui.QColor("#ff7675"))   # vibrant pastel red
             elif self.current_value > self.nop:
-                painter.setBrush(QtGui.QColor(255, 165, 0)) # Orange
+                painter.setBrush(QtGui.QColor("#fdcb6e"))   # vibrant pastel amber
             else:
-                painter.setBrush(QtGui.QColor(0, 255, 0)) # Green
-            
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.drawRect(bar_x, fill_y, bar_w, fill_h)
-        
-        # Draw Lines for NOP and MEOP
-        painter.setPen(QtGui.QPen(QtCore.Qt.GlobalColor.white, 1, QtCore.Qt.PenStyle.DotLine))
-        
-        # NOP Line
-        nop_ratio = self.nop / max_val
-        nop_y = bar_y + bar_h - int(nop_ratio * bar_h)
-        if 0 <= nop_ratio <= 1:
-            painter.drawLine(bar_x, nop_y, bar_x + bar_w, nop_y)
-            
-        # MEOP Line
-        meop_ratio = self.meop / max_val
-        meop_y = bar_y + bar_h - int(meop_ratio * bar_h)
-        if 0 <= meop_ratio <= 1:
-            painter.drawLine(bar_x, meop_y, bar_x + bar_w, meop_y)
+                painter.setBrush(QtGui.QColor("#27ae60"))   # jungle green (darker for white text)
 
-        # Draw Value Text
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRect(bar_x, fill_y, draw_w, fill_h)
+
+        # Global line Y positions: convert from parent coords to local
+        my_y_in_parent = self.geometry().y()
+        def to_local(parent_y):
+            return int(parent_y - my_y_in_parent) if parent_y is not None else None
+        ly20 = to_local(self._line_y20_parent)
+        ly40 = to_local(self._line_y40_parent)
+        ly60 = to_local(self._line_y60_parent)
+        ly80 = to_local(self._line_y80_parent)
+
+        # Fallback if parent has not set global lines yet: compute from this bar's rect
+        if ly20 is None:
+            bar_height = bar_bottom_y - bar_y
+            ly20 = bar_bottom_y - int(0.20 * bar_height)
+            ly40 = bar_bottom_y - int(0.40 * bar_height)
+            ly60 = bar_bottom_y - int(0.60 * bar_height)
+            ly80 = bar_bottom_y - int(0.80 * bar_height)
+
+        # Draw four dashed lines at 20%, 40%, 60%, 80% (same pixel y). THRESH/NOP white, MEOP orange, POP red.
+        white_dash = QtGui.QPen(QtCore.Qt.GlobalColor.white, 1, QtCore.Qt.PenStyle.DashLine)
+        orange_dash = QtGui.QPen(QtGui.QColor("#ff9f43"), 1, QtCore.Qt.PenStyle.DashLine)
+        red_dash = QtGui.QPen(QtGui.QColor("#ff4444"), 1, QtCore.Qt.PenStyle.DashLine)
+        for ly in (ly20, ly40):
+            painter.setPen(white_dash)
+            painter.drawLine(bar_x, ly, bar_x + draw_w, ly)
+        painter.setPen(orange_dash)
+        painter.drawLine(bar_x, ly60, bar_x + draw_w, ly60)
+        painter.setPen(red_dash)
+        painter.drawLine(bar_x, ly80, bar_x + draw_w, ly80)
+
+        # Labels: y80=POP, y60=MEOP, y40=NOP, y20=THRESH (PSI values, positions fixed by line)
+        label_font = painter.font()
+        label_font.setPointSize(7)
+        painter.setFont(label_font)
+        painter.setPen(QtCore.Qt.GlobalColor.white)
+        line_height = 12
+        for ly, limit_val in [
+            (ly80, self.pop),
+            (ly60, self.meop),
+            (ly40, self.nop),
+            (ly20, self.thresh),
+        ]:
+            label_y = ly - line_height // 2
+            label_rect = QtCore.QRect(label_x, label_y, label_width, line_height)
+            painter.drawText(label_rect, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter, f"{int(limit_val)}")
+
+        # Value box under the bar (with gap above): filled rounded rect in bar color, then text
+        value_box_y = bar_bottom_y + self.BOTTOM_GAP
+        val_rect = QtCore.QRect(bar_x, value_box_y, draw_w, self.VALUE_BOX_HEIGHT)
+        box_color = self.fixed_color if self.fixed_color else (
+            QtGui.QColor("#ff7675") if self.current_value > self.meop else
+            QtGui.QColor("#fdcb6e") if self.current_value > self.nop else
+            QtGui.QColor("#27ae60")
+        )
+        painter.setPen(QtGui.QPen(box_color, 2))
+        painter.setBrush(box_color)
+        radius = 4
+        painter.drawRoundedRect(val_rect, radius, radius)
+        # Draw value text on top (larger, bold, white)
+        val_font = painter.font()
+        val_font.setPointSize(val_font.pointSize() + 2)
+        val_font.setWeight(QtGui.QFont.Weight.Bold)
+        painter.setFont(val_font)
         painter.setPen(QtCore.Qt.GlobalColor.white)
         val_str = f"{self.current_value:.0f}"
-        painter.drawText(QtCore.QRect(0, h - bottom_margin, w, bottom_margin), QtCore.Qt.AlignmentFlag.AlignCenter, val_str)
+        painter.drawText(val_rect, QtCore.Qt.AlignmentFlag.AlignCenter, val_str)
 
 
 class TopBarWidget(QtWidgets.QWidget):
     navigation_requested = QtCore.pyqtSignal(str)  # "dashboard" or "settings"
+    mode_changed = QtCore.pyqtSignal(str)  # Mode name string
+    debug_toggled = QtCore.pyqtSignal(bool)  # DEBUG mode enabled/disabled
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(120)
+        self.setFixedHeight(150)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(0)
         
-        # Pressure Bars
-        # Colors: GN2=Green, ETH=Red, LOX=Blue
-        self.bar_gn2 = PressureBarWidget("GN2", fixed_color=QtGui.QColor(0, 255, 0))
-        self.bar_eth = PressureBarWidget("ETH", fixed_color=QtGui.QColor(255, 0, 0))
-        self.bar_lox = PressureBarWidget("LOX", fixed_color=QtGui.QColor(0, 0, 255))
+        # Pressure Bars: bottom=0, shared scale_max so THRESH/NOP/MEOP/POP align across bars
+        pl = CONFIG.config.get("pressure_limits", {})
+        def limits(fluid: str):
+            d = pl.get(fluid, {})
+            return (float(d.get("NOP", 600)), float(d.get("MEOP", 650)), float(d.get("POP", 750)), float(d.get("THRESH", 400)))
+        nop_gn2, meop_gn2, pop_gn2, thresh_gn2 = limits("GN2")
+        nop_eth, meop_eth, pop_eth, thresh_eth = limits("ETH")
+        nop_lox, meop_lox, pop_lox, thresh_lox = limits("LOX")
+        scale_max = max(1.25 * pop_gn2, 1.25 * pop_eth, 1.25 * pop_lox, 1.0)
+        # Vibrant pastel bar colors (match app's stylized pastel palette)
+        self.bar_gn2 = PressureBarWidget("GN2", nop_gn2, meop_gn2, pop_gn2, thresh=thresh_gn2, fixed_color=QtGui.QColor("#27ae60"))   # jungle green (darker for white text)
+        self.bar_eth = PressureBarWidget("ETH", nop_eth, meop_eth, pop_eth, thresh=thresh_eth, fixed_color=QtGui.QColor("#ff9f43"))   # vibrant pastel orange (fuel)
+        self.bar_lox = PressureBarWidget("LOX", nop_lox, meop_lox, pop_lox, thresh=thresh_lox, fixed_color=QtGui.QColor("#74b9ff"))   # vibrant pastel blue
+        for bar in (self.bar_gn2, self.bar_eth, self.bar_lox):
+            bar.scale_max = scale_max
+
+        layout.addWidget(self.bar_gn2, 0)
+        layout.addWidget(self.bar_eth, 0)
+        layout.addWidget(self.bar_lox, 0)
+
+        # Compute global dashed-line Y positions once from first bar's rect (same pixel y for all three)
+        self._update_global_line_ys()
         
-        layout.addWidget(self.bar_gn2)
-        layout.addWidget(self.bar_eth)
-        layout.addWidget(self.bar_lox)
+        # Add stretch before mode buttons to center them
+        layout.addStretch()
         
+        # Mode Selection Buttons (radio button group) - 2 rows
+        mode_button_container = QtWidgets.QVBoxLayout()
+        mode_button_container.setSpacing(5)
+        
+        # Create two horizontal rows
+        row1_layout = QtWidgets.QHBoxLayout()
+        row1_layout.setSpacing(5)
+        row2_layout = QtWidgets.QHBoxLayout()
+        row2_layout.setSpacing(5)
+        
+        # Button group to ensure only one button is selected at a time
+        self.mode_button_group = QtWidgets.QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+        
+        # List of button labels (same order as CSV header, minus Abort and Debug)
+        # CSV: Idle, Armed, Fuel Fill, Ox Fill, Quick Fire, GN2 Press, Fuel Press, Fuel Vent, Ox Press, Ox Vent, High Press, GN2 Vent, Fire, Vent, Abort
+        # Abort is handled by the dedicated yellow ABORT button on the right.
+        # Debug is handled by the DEBUG button (unlocks states and manual control)
+        mode_labels = ["Idle", "Armed", "Fuel Fill", "Ox Fill", "Quick Fire", "GN2 Press", "Fuel Press", "Fuel Vent", "Ox Press", "Ox Vent", "High Press", "GN2 Vent", "Fire", "Vent"]
+        self.mode_buttons = []
+        
+        # Load state transitions
+        self.state_transitions = load_state_transitions_csv(CONFIG.get_state_transitions_csv_path())
+        self.current_state = None  # Track current state for transition validation (None = no state selected)
+        self.unlock_states = False  # Track whether state transitions are unlocked (via DEBUG button)
+        
+        # Quick Fire → GN2 Press: after 3s in Quick Fire, auto-transition to GN2 Press
+        self.quick_fire_to_gn2_timer = QtCore.QTimer(self)
+        self.quick_fire_to_gn2_timer.setSingleShot(True)
+        self.quick_fire_to_gn2_timer.timeout.connect(self._on_quick_fire_3s_elapsed)
+        # Abort → Vent, then after 5s auto-transition to Abort
+        self.abort_vent_to_abort_timer = QtCore.QTimer(self)
+        self.abort_vent_to_abort_timer.setSingleShot(True)
+        self.abort_vent_to_abort_timer.timeout.connect(self._on_abort_vent_5s_elapsed)
+        
+        # Helper function to get button color based on state name
+        def get_state_color(state_name: str) -> str:
+            """Return pastel background color for state button"""
+            state_lower = state_name.lower()
+            if "vent" in state_lower:
+                return "#c5b0d8"  # Pastel purple
+            elif "fire" in state_lower or state_lower == "quick fire":
+                return "#ffc0c5"  # Pastel red
+            elif "fill" in state_lower:
+                return "#ffe5cc"  # Pastel orange
+            elif "press" in state_lower:
+                return "#c5e0ff"  # Pastel blue
+            elif state_lower == "armed":
+                return "#ffffcc"  # Pastel yellow
+            else:  # Idle - keep default gray
+                return "#e0e0e0"  # Light gray
+        
+        self.get_state_color = get_state_color
+        
+        # Vivid/saturated colors for SELECTED state (super obvious which is current)
+        def get_state_selected_color(state_name: str) -> str:
+            """Return vivid, saturated color for selected state button."""
+            state_lower = state_name.lower()
+            if "vent" in state_lower:
+                return "#9932cc"  # Vivid purple
+            elif "fire" in state_lower or state_lower == "quick fire":
+                return "#dc143c"  # Vivid red (crimson)
+            elif "fill" in state_lower:
+                return "#ff8c00"  # Vivid orange
+            elif "press" in state_lower:
+                return "#0066cc"  # Vivid blue
+            elif state_lower == "armed":
+                return "#ffd700"  # Vivid yellow/gold
+            else:  # Idle
+                return "#708090"  # Vivid gray (slate)
+        
+        self.get_state_selected_color = get_state_selected_color
+        
+        def text_color_for_bg(hex_bg: str) -> str:
+            """Return #000000 or #ffffff for readable text on the given background."""
+            hex_bg = hex_bg.lstrip('#')
+            r = int(hex_bg[0:2], 16)
+            g = int(hex_bg[2:4], 16)
+            b = int(hex_bg[4:6], 16)
+            # Relative luminance (perceived brightness)
+            lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            return "#ffffff" if lum < 0.6 else "#000000"
+        
+        self.text_color_for_bg = text_color_for_bg
+        
+        # Create buttons and distribute them across 2 rows
+        # Note: Initial styling will be set by update_button_states() after buttons are created
+        for i, label in enumerate(mode_labels):
+            btn = QtWidgets.QPushButton(label)
+            btn.setCheckable(True)
+            # Use a lambda with default argument to capture the correct index
+            btn.clicked.connect(lambda checked=False, idx=i: self.on_mode_button_clicked(idx))
+            self.mode_button_group.addButton(btn, i)
+            
+            # Distribute buttons across 2 rows (7 in first row, 7 in second row for 14 buttons)
+            if i < 7:
+                row1_layout.addWidget(btn)
+            else:
+                row2_layout.addWidget(btn)
+            
+            self.mode_buttons.append(btn)
+        
+        # Add rows to container
+        mode_button_container.addLayout(row1_layout)
+        mode_button_container.addLayout(row2_layout)
+        
+        # On startup: no state selected, only Idle is enabled
+        # Update button states for no state (None) - only Idle will be enabled
+        self.update_button_states(None)
+        
+        layout.addLayout(mode_button_container)
         layout.addStretch()
         
         # Buttons Layout
         btn_layout = QtWidgets.QVBoxLayout()
         
-        # Abort Buttons Row
+        # Abort Buttons Row — solid colors, no gradients; match state-button look
         abort_row = QtWidgets.QHBoxLayout()
         self.btn_abort = QtWidgets.QPushButton("ABORT")
-        self.btn_abort.setMinimumSize(120, 40)
-        self.btn_abort.setStyleSheet("background-color: orange; font-weight: bold; color: black;")
-        self.btn_abort.clicked.connect(self.abort)
+        self.btn_abort.setMinimumSize(100, 32)
+        self.btn_abort.setStyleSheet("""
+            QPushButton {
+                font-size: 9pt;
+                font-weight: bold;
+                background-color: #e67e22;
+                color: #ffffff;
+                border: 2px solid #b85c0e;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #eb9842;
+                border-color: #d35400;
+            }
+            QPushButton:pressed {
+                background-color: #d35400;
+                border-color: #b85c0e;
+            }
+        """)
+        self.btn_abort.clicked.connect(lambda: self.abort("ABORT"))
         
         self.btn_emergency = QtWidgets.QPushButton("EMERGENCY ABORT")
-        self.btn_emergency.setMinimumSize(120, 40)
-        self.btn_emergency.setStyleSheet("background-color: red; font-weight: bold; color: white;")
-        self.btn_emergency.clicked.connect(self.abort)
+        self.btn_emergency.setMinimumSize(100, 32)
+        self.btn_emergency.setStyleSheet("""
+            QPushButton {
+                font-size: 9pt;
+                font-weight: bold;
+                background-color: #c0392b;
+                color: #ffffff;
+                border: 2px solid #922b21;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+                border-color: #c0392b;
+            }
+            QPushButton:pressed {
+                background-color: #a93226;
+                border-color: #922b21;
+            }
+        """)
+        self.btn_emergency.clicked.connect(lambda: self.abort("EMERGENCY ABORT"))
         
         abort_row.addWidget(self.btn_abort)
         abort_row.addWidget(self.btn_emergency)
         btn_layout.addLayout(abort_row)
         
-        # Navigation Button
+        # SETTINGS — solid neutral button, same shape as other controls
         self.nav_btn = QtWidgets.QPushButton("SETTINGS")
-        self.nav_btn.setMinimumHeight(30)
+        self.nav_btn.setMinimumHeight(26)
+        self.nav_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 8pt;
+                font-weight: normal;
+                background-color: #505050;
+                color: #ffffff;
+                border: 2px solid #404040;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #606060;
+                border-color: #505050;
+            }
+            QPushButton:pressed {
+                background-color: #404040;
+                border-color: #353535;
+            }
+        """)
         self.nav_btn.clicked.connect(self.toggle_view)
         btn_layout.addWidget(self.nav_btn)
         
-        layout.addLayout(btn_layout)
+        # DEBUG — toggle; unchecked = neutral, checked = solid green (no gradients)
+        self.debug_btn = QtWidgets.QPushButton("DEBUG")
+        self.debug_btn.setMinimumHeight(26)
+        self.debug_btn.setCheckable(True)
+        self.debug_btn.setChecked(False)
+        self.debug_btn.clicked.connect(self.on_debug_clicked)
+        self.debug_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 8pt;
+                font-weight: normal;
+                background-color: #505050;
+                color: #ffffff;
+                border: 2px solid #404040;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #606060;
+                border-color: #505050;
+            }
+            QPushButton:pressed {
+                background-color: #404040;
+                border-color: #353535;
+            }
+            QPushButton:checked {
+                background-color: #27ae60;
+                color: #000000;
+                border: 2px solid #1e8449;
+            }
+            QPushButton:checked:hover {
+                background-color: #2ecc71;
+                border-color: #27ae60;
+            }
+            QPushButton:checked:pressed {
+                background-color: #1e8449;
+                border-color: #196f3d;
+            }
+        """)
+        btn_layout.addWidget(self.debug_btn)
         
-    def abort(self):
-        """Placeholder for abort functionality."""
-        print("ABORT TRIGGERED")
+        # Current state display (under Settings/Debug)
+        self.current_state_label = QtWidgets.QLabel("CURRENT STATE: —")
+        self.current_state_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        btn_layout.addWidget(self.current_state_label)
+        self._update_current_state_display()
+        
+        layout.addLayout(btn_layout)
+
+    def _update_global_line_ys(self):
+        """Compute bar rect once from first bar; set same y20,y40,y60,y80 (parent coords) on all three bars."""
+        ref = self.bar_gn2
+        top_margin = PressureBarWidget.TOP_MARGIN
+        bottom_margin = PressureBarWidget.BOTTOM_MARGIN
+        bar_top_y = ref.geometry().y() + top_margin
+        bar_bottom_y = ref.geometry().y() + ref.geometry().height() - bottom_margin
+        bar_height = bar_bottom_y - bar_top_y
+        y20 = bar_bottom_y - 0.20 * bar_height
+        y40 = bar_bottom_y - 0.40 * bar_height
+        y60 = bar_bottom_y - 0.60 * bar_height
+        y80 = bar_bottom_y - 0.80 * bar_height
+        for bar in (self.bar_gn2, self.bar_eth, self.bar_lox):
+            bar.set_global_line_ys(y20, y40, y60, y80)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_global_line_ys()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_global_line_ys()
+
+    def _update_current_state_display(self):
+        """Update the CURRENT STATE label to reflect self.current_state."""
+        state_text = self.current_state if self.current_state is not None else "—"
+        self.current_state_label.setText(f"CURRENT STATE: {state_text}")
+    
+    def on_debug_clicked(self):
+        """Handle DEBUG button click (toggle) - unlocks states and manual actuator control"""
+        checked = self.debug_btn.isChecked()
+        self.unlock_states = checked
+        
+        # Emit signal to notify main window to update actuator control
+        self.debug_toggled.emit(checked)
+        
+        # Update button states when debug state changes
+        self.update_button_states(self.current_state)
+    
+    def update_button_states(self, current_state: str):
+        """Update button enabled/disabled states and styles based on allowed transitions"""
+        mode_labels = ["Idle", "Armed", "Fuel Fill", "Ox Fill", "Quick Fire", "GN2 Press", "Fuel Press", "Fuel Vent", "Ox Press", "Ox Vent", "High Press", "GN2 Vent", "Fire", "Vent"]
+        
+        # Get allowed transitions for current state
+        if current_state is None:
+            # No state selected: only Idle is allowed
+            allowed_transitions = {"Idle": True}
+            for state in mode_labels:
+                if state != "Idle":
+                    allowed_transitions[state] = False
+        else:
+            allowed_transitions = self.state_transitions.get(current_state, {})
+        
+        # If DEBUG/unlock is enabled, allow all transitions
+        if self.unlock_states:
+            allowed_transitions = {state: True for state in mode_labels}
+        
+        # Update each button based on whether transition is allowed
+        for i, btn in enumerate(self.mode_buttons):
+            if i < len(mode_labels):
+                next_state = mode_labels[i]
+                is_allowed = allowed_transitions.get(next_state, False)
+                
+                # Get color for this state
+                bg_color = self.get_state_color(next_state)
+                
+                # Calculate hover color (slightly lighter)
+                hover_color = self._lighten_color(bg_color, 20)
+                
+                # Enable/disable button
+                btn.setEnabled(is_allowed)
+                
+                # Create style based on button state
+                if btn.isChecked():
+                    # Selected: vivid, saturated color so current state is super obvious
+                    selected_bg = self.get_state_selected_color(next_state)
+                    selected_text = self.text_color_for_bg(selected_bg)
+                    style = f"""
+                        QPushButton {{
+                            font-size: 9pt;
+                            font-weight: bold;
+                            background-color: {selected_bg};
+                            color: {selected_text};
+                            border: 3px solid #000000;
+                            border-radius: 5px;
+                            padding: 6px 8px;
+                            min-width: 80px;
+                        }}
+                    """
+                elif is_allowed:
+                    # Unselected: colored background with dark text for readability on pastel colors
+                    style = f"""
+                        QPushButton {{
+                            font-size: 9pt;
+                            font-weight: bold;
+                            background-color: {bg_color};
+                            color: #000000;
+                            border: 2px solid #888888;
+                            border-radius: 5px;
+                            padding: 6px 8px;
+                            min-width: 80px;
+                        }}
+                        QPushButton:hover {{
+                            background-color: {hover_color};
+                            border-color: #666666;
+                        }}
+                    """
+                else:
+                    # Disabled: actual grey color
+                    style = """
+                        QPushButton {
+                            font-size: 9pt;
+                            font-weight: bold;
+                            background-color: #808080;
+                            color: #666666;
+                            border: 2px solid #666666;
+                            border-radius: 5px;
+                            padding: 6px 8px;
+                            min-width: 80px;
+                        }
+                        QPushButton:hover {
+                            background-color: #808080;
+                            border-color: #666666;
+                        }
+                    """
+                
+                btn.setStyleSheet(style)
+    
+    def _lighten_color(self, hex_color: str, amount: int) -> str:
+        """Lighten a hex color by the given amount"""
+        hex_color = hex_color.lstrip('#')
+        r = min(255, int(hex_color[0:2], 16) + amount)
+        g = min(255, int(hex_color[2:4], 16) + amount)
+        b = min(255, int(hex_color[4:6], 16) + amount)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    
+    def _darken_color(self, hex_color: str, amount: int) -> str:
+        """Darken a hex color by the given amount"""
+        hex_color = hex_color.lstrip('#')
+        r = max(0, int(hex_color[0:2], 16) - amount)
+        g = max(0, int(hex_color[2:4], 16) - amount)
+        b = max(0, int(hex_color[4:6], 16) - amount)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    
+    def on_mode_button_clicked(self, idx):
+        """Handle mode button click - update highlighting"""
+        # Ensure the clicked button stays checked (exclusive group handles this, but be explicit)
+        if 0 <= idx < len(self.mode_buttons):
+            # Check if button is enabled (transition allowed) - unless DEBUG/unlock is enabled
+            if not self.unlock_states and not self.mode_buttons[idx].isEnabled():
+                return  # Don't allow clicking disabled buttons unless DEBUG is enabled
+            
+            self.mode_buttons[idx].setChecked(True)
+            # Emit signal with mode name (keep in sync with mode_labels above)
+            mode_labels = ["Idle", "Armed", "Fuel Fill", "Ox Fill", "Quick Fire", "GN2 Press", "Fuel Press", "Fuel Vent", "Ox Press", "Ox Vent", "High Press", "GN2 Vent", "Fire", "Vent"]
+            if 0 <= idx < len(mode_labels):
+                new_state = mode_labels[idx]
+                self.current_state = new_state
+                self._update_current_state_display()
+                # Update button states for new current state
+                self.update_button_states(new_state)
+                self.mode_changed.emit(new_state)
+                # Quick Fire: start 3s timer to auto-transition to GN2 Press; otherwise cancel timer
+                if new_state == "Quick Fire":
+                    self.quick_fire_to_gn2_timer.stop()
+                    self.quick_fire_to_gn2_timer.start(3000)
+                else:
+                    self.quick_fire_to_gn2_timer.stop()
+                self.abort_vent_to_abort_timer.stop()
+        
+        # Button styles are now handled by update_button_states, which is called above
+
+    def _on_quick_fire_3s_elapsed(self):
+        """After 3s in Quick Fire, auto-transition to GN2 Press."""
+        if self.current_state == "Quick Fire":
+            self.request_state("GN2 Press")
+
+    def _on_abort_vent_5s_elapsed(self):
+        """After 5s in Vent (from ABORT button), auto-transition to Abort."""
+        self._apply_abort_state()
+
+    def _clear_mode_button_selection(self):
+        """Clear selection of all mode buttons so none appear selected (e.g. for Abort/Vent-from-abort)."""
+        self.mode_button_group.setExclusive(False)
+        for btn in self.mode_buttons:
+            btn.setChecked(False)
+        self.mode_button_group.setExclusive(True)
+
+    def _apply_abort_state(self):
+        """Set GUI and emitted state to Abort (used by EMERGENCY ABORT and by 5s Vent→Abort timer)."""
+        self.quick_fire_to_gn2_timer.stop()
+        self.abort_vent_to_abort_timer.stop()
+        self.current_state = "Abort"
+        self._update_current_state_display()
+        self._clear_mode_button_selection()
+        self.update_button_states("Abort")
+        self.mode_changed.emit("Abort")
+
+    def request_state(self, mode_name: str):
+        """Programmatically switch to a state (e.g. for automatic pressure-based transitions). Bypasses transition check."""
+        mode_labels = ["Idle", "Armed", "Fuel Fill", "Ox Fill", "Quick Fire", "GN2 Press", "Fuel Press", "Fuel Vent", "Ox Press", "Ox Vent", "High Press", "GN2 Vent", "Fire", "Vent"]
+        if mode_name not in mode_labels:
+            return
+        idx = mode_labels.index(mode_name)
+        self.mode_buttons[idx].setChecked(True)
+        self.current_state = mode_name
+        self._update_current_state_display()
+        self.update_button_states(mode_name)
+        self.mode_changed.emit(mode_name)
+        # Quick Fire: start 3s timer to auto-transition to GN2 Press; otherwise cancel timer
+        if mode_name == "Quick Fire":
+            self.quick_fire_to_gn2_timer.stop()
+            self.quick_fire_to_gn2_timer.start(3000)
+        else:
+            self.quick_fire_to_gn2_timer.stop()
+        self.abort_vent_to_abort_timer.stop()
+        
+    def abort(self, abort_type: str = "ABORT"):
+        """Trigger Abort state (CSV) and log the event.
+        ABORT: go to Vent first, then after 5s automatically go to Abort.
+        EMERGENCY ABORT: go to Abort immediately, no matter what state or mode (including DEBUG).
+        """
+        print(f"{abort_type} TRIGGERED")
+        parent = self.parent()
+        if abort_type == "EMERGENCY ABORT":
+            # Always go to Abort immediately, regardless of state/mode/DEBUG
+            self._apply_abort_state()
+            if parent and hasattr(parent, 'log_event'):
+                parent.log_event("Abort", f"{abort_type} button pressed")
+            return
+        if abort_type == "ABORT":
+            # Go to Vent first; after 5s _on_abort_vent_5s_elapsed will transition to Abort
+            self.quick_fire_to_gn2_timer.stop()
+            self.abort_vent_to_abort_timer.stop()
+            self.current_state = "Vent"
+            self._update_current_state_display()
+            self._clear_mode_button_selection()
+            self.update_button_states("Vent")
+            self.mode_changed.emit("Vent")
+            self.abort_vent_to_abort_timer.start(5000)
+        if parent and hasattr(parent, 'log_event'):
+            parent.log_event("Abort", f"{abort_type} button pressed")
 
     def toggle_view(self):
         text = self.nav_btn.text()
@@ -1576,7 +2831,8 @@ class SettingsWidget(QtWidgets.QWidget):
         main_layout = QtWidgets.QHBoxLayout(self)
         
         # Left Column: Sensor & General Settings
-        left_col = QtWidgets.QVBoxLayout()
+        left_col_widget = QtWidgets.QWidget()
+        left_col = QtWidgets.QVBoxLayout(left_col_widget)
         
         # ... Sensor Settings ...
         sensor_group = QtWidgets.QGroupBox("Sensor & General View Settings")
@@ -1610,6 +2866,59 @@ class SettingsWidget(QtWidgets.QWidget):
         sensor_group.setLayout(sensor_layout)
         left_col.addWidget(sensor_group)
         
+        # Moving average (graph and display)
+        ma_group = QtWidgets.QGroupBox("Moving Average")
+        ma_layout = QtWidgets.QFormLayout()
+        self.graph_ma_spin = QtWidgets.QSpinBox()
+        self.graph_ma_spin.setRange(1, 100)
+        self.graph_ma_spin.setSuffix(" samples")
+        self.graph_ma_spin.valueChanged.connect(self.on_graph_ma_changed)
+        ma_layout.addRow("Graph:", self.graph_ma_spin)
+        self.display_ma_spin = QtWidgets.QSpinBox()
+        self.display_ma_spin.setRange(1, 100)
+        self.display_ma_spin.setSuffix(" samples")
+        self.display_ma_spin.valueChanged.connect(self.on_display_ma_changed)
+        ma_layout.addRow("Display:", self.display_ma_spin)
+        ma_group.setLayout(ma_layout)
+        left_col.addWidget(ma_group)
+        
+        # Plot visibility: which sensors to show on the graph (horizontal row) + Debug button
+        visibility_group = QtWidgets.QGroupBox("Plot visibility & Debug")
+        visibility_layout = QtWidgets.QVBoxLayout()
+        title_lbl = QtWidgets.QLabel("Sensors to show on plot")
+        title_lbl.setStyleSheet("font-weight: bold;")
+        visibility_layout.addWidget(title_lbl)
+        # Row of number labels, then row of checkboxes (horizontal)
+        numbers_row = QtWidgets.QHBoxLayout()
+        numbers_row.setSpacing(4)
+        checkboxes_row = QtWidgets.QHBoxLayout()
+        checkboxes_row.setSpacing(4)
+        small_font = QtGui.QFont()
+        small_font.setPointSize(8)
+        self.plot_visibility_cbs: Dict[int, QtWidgets.QCheckBox] = {}
+        for i in range(1, NUM_CONNECTORS + 1):
+            num_lbl = QtWidgets.QLabel(str(i))
+            num_lbl.setFont(small_font)
+            num_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            num_lbl.setFixedWidth(24)
+            numbers_row.addWidget(num_lbl)
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(True)
+            cb.stateChanged.connect(lambda s, cid=i: self.sensor_widget._on_plot_toggle(cid, s))
+            cb.setFixedWidth(24)
+            checkboxes_row.addWidget(cb)
+            self.plot_visibility_cbs[i] = cb
+        visibility_layout.addLayout(numbers_row)
+        visibility_layout.addLayout(checkboxes_row)
+        self.only_show_pt_with_roles_chk = QtWidgets.QCheckBox("Only show PTs with roles")
+        self.only_show_pt_with_roles_chk.toggled.connect(self.on_only_show_pt_with_roles_changed)
+        visibility_layout.addWidget(self.only_show_pt_with_roles_chk)
+        self.debug_btn = QtWidgets.QPushButton("Open debug panel…")
+        self.debug_btn.clicked.connect(self.sensor_widget.open_debug_menu)
+        visibility_layout.addWidget(self.debug_btn)
+        visibility_group.setLayout(visibility_layout)
+        left_col.addWidget(visibility_group)
+        
         # ADC Settings
         adc_group = QtWidgets.QGroupBox("ADC Configuration")
         adc_layout = QtWidgets.QFormLayout()
@@ -1627,10 +2936,16 @@ class SettingsWidget(QtWidgets.QWidget):
         left_col.addWidget(adc_group)
         
         left_col.addStretch()
-        main_layout.addLayout(left_col, 1)
+        
+        # Wrap left column in scroll area
+        left_scroll = QtWidgets.QScrollArea()
+        left_scroll.setWidget(left_col_widget)
+        left_scroll.setWidgetResizable(True)
+        main_layout.addWidget(left_scroll, 1)
         
         # Middle Column: Actuator Configuration
-        mid_col = QtWidgets.QVBoxLayout()
+        mid_col_widget = QtWidgets.QWidget()
+        mid_col = QtWidgets.QVBoxLayout(mid_col_widget)
         act_group = QtWidgets.QGroupBox("Actuator Configuration")
         act_layout = QtWidgets.QVBoxLayout()
         
@@ -1645,28 +2960,69 @@ class SettingsWidget(QtWidgets.QWidget):
         form.addRow("Device Port:", self.act_port)
         act_layout.addLayout(form)
         
-        act_layout.addWidget(QtWidgets.QLabel("Actuator Names:"))
+        self.only_show_actuators_with_roles_chk = QtWidgets.QCheckBox("Only show actuators with roles")
+        self.only_show_actuators_with_roles_chk.toggled.connect(self.on_only_show_actuators_with_roles_changed)
+        act_layout.addWidget(self.only_show_actuators_with_roles_chk)
+        
+        act_layout.addWidget(QtWidgets.QLabel("Actuator role → slot:"))
         self.act_scroll = QtWidgets.QScrollArea()
         self.act_scroll_widget = QtWidgets.QWidget()
         self.act_form = QtWidgets.QFormLayout(self.act_scroll_widget)
-        self.act_inputs = {}
-        for i in range(1, NUM_ACTUATORS + 1):
-            le = QtWidgets.QLineEdit()
-            le.textChanged.connect(lambda txt, idx=i: self.on_actuator_name_changed(idx, txt))
-            self.act_form.addRow(f"Actuator {i}:", le)
-            self.act_inputs[i] = le
+        self.act_inputs = {}  # role_name -> QComboBox (actuator number 0=None, 1-10)
+        for role_name in CONFIG.get_actuator_role_names():
+            combo = QtWidgets.QComboBox()
+            combo.addItem("—", 0)
+            for act_num in range(1, NUM_ACTUATORS + 1):
+                combo.addItem(str(act_num), act_num)
+            combo.currentIndexChanged.connect(lambda idx, rn=role_name, c=combo: self.on_actuator_role_changed(rn, c))
+            self.act_form.addRow(role_name + ":", combo)
+            self.act_inputs[role_name] = combo
         self.act_scroll.setWidget(self.act_scroll_widget)
         self.act_scroll.setWidgetResizable(True)
         act_layout.addWidget(self.act_scroll)
         
         act_group.setLayout(act_layout)
         mid_col.addWidget(act_group)
-        main_layout.addLayout(mid_col, 1)
+        mid_col.addStretch()
+        
+        # Wrap middle column in scroll area
+        mid_scroll = QtWidgets.QScrollArea()
+        mid_scroll.setWidget(mid_col_widget)
+        mid_scroll.setWidgetResizable(True)
+        main_layout.addWidget(mid_scroll, 1)
         
         # Right Column: PT Configuration & Gauge Mapping
-        right_col = QtWidgets.QVBoxLayout()
+        right_col_widget = QtWidgets.QWidget()
+        right_col = QtWidgets.QVBoxLayout(right_col_widget)
         pt_group = QtWidgets.QGroupBox("Pressure Transducers (PT) & Mapping")
         pt_layout = QtWidgets.QVBoxLayout()
+        
+        # PT calibration CSV paths (from config; empty = use built-in default)
+        pt_csv_group = QtWidgets.QGroupBox("PT Calibration CSVs")
+        pt_csv_layout = QtWidgets.QVBoxLayout()
+        
+        self.pt_calibration_csv_list = QtWidgets.QListWidget()
+        self.pt_calibration_csv_list.setMaximumHeight(120)
+        pt_csv_layout.addWidget(self.pt_calibration_csv_list)
+        
+        pt_csv_buttons = QtWidgets.QHBoxLayout()
+        pt_csv_add = QtWidgets.QPushButton("Add CSV…")
+        pt_csv_add.clicked.connect(self.on_pt_calibration_csv_add)
+        pt_csv_remove = QtWidgets.QPushButton("Remove Selected")
+        pt_csv_remove.clicked.connect(self.on_pt_calibration_csv_remove)
+        pt_csv_buttons.addWidget(pt_csv_add)
+        pt_csv_buttons.addWidget(pt_csv_remove)
+        pt_csv_buttons.addStretch()
+        pt_csv_layout.addLayout(pt_csv_buttons)
+        
+        self.pt_calibration_error_label = QtWidgets.QLabel()
+        self.pt_calibration_error_label.setStyleSheet("color: red;")
+        self.pt_calibration_error_label.setWordWrap(True)
+        self.pt_calibration_error_label.setVisible(False)
+        pt_csv_layout.addWidget(self.pt_calibration_error_label)
+        
+        pt_csv_group.setLayout(pt_csv_layout)
+        pt_layout.addWidget(pt_csv_group)
         
         # Gauge Mapping (Moved to top as requested)
         mapping_group = QtWidgets.QGroupBox("Top Bar Gauge Mapping")
@@ -1693,27 +3049,72 @@ class SettingsWidget(QtWidgets.QWidget):
         mapping_group.setLayout(mapping_form)
         pt_layout.addWidget(mapping_group)
         
-        # PT Names List
-        pt_layout.addWidget(QtWidgets.QLabel("PT Names (Calibrated):"))
-        self.pt_scroll = QtWidgets.QScrollArea()
-        self.pt_scroll_widget = QtWidgets.QWidget()
-        self.pt_form = QtWidgets.QFormLayout(self.pt_scroll_widget)
-        self.pt_inputs = {}
+        # State transition thresholds (auto transitions: POP = over → vent, THRESH = under → press)
+        thresh_group = QtWidgets.QGroupBox("State Transition Thresholds (psi)")
+        thresh_form = QtWidgets.QFormLayout()
+        self.gn2_pop_spin = QtWidgets.QDoubleSpinBox()
+        self.gn2_pop_spin.setRange(0, 10000)
+        self.gn2_pop_spin.setDecimals(1)
+        self.gn2_pop_spin.setSuffix(" psi")
+        self.gn2_pop_spin.valueChanged.connect(lambda v: self._on_threshold_changed("gn2_pop_psi", v))
+        thresh_form.addRow("GN2 POP (→ GN2 Vent):", self.gn2_pop_spin)
+        self.fuel_pop_spin = QtWidgets.QDoubleSpinBox()
+        self.fuel_pop_spin.setRange(0, 10000)
+        self.fuel_pop_spin.setDecimals(1)
+        self.fuel_pop_spin.setSuffix(" psi")
+        self.fuel_pop_spin.valueChanged.connect(lambda v: self._on_threshold_changed("fuel_pop_psi", v))
+        thresh_form.addRow("Fuel POP (→ Fuel Vent):", self.fuel_pop_spin)
+        self.ox_pop_spin = QtWidgets.QDoubleSpinBox()
+        self.ox_pop_spin.setRange(0, 10000)
+        self.ox_pop_spin.setDecimals(1)
+        self.ox_pop_spin.setSuffix(" psi")
+        self.ox_pop_spin.valueChanged.connect(lambda v: self._on_threshold_changed("ox_pop_psi", v))
+        thresh_form.addRow("Ox POP (→ Ox Vent):", self.ox_pop_spin)
+        self.gn2_thresh_spin = QtWidgets.QDoubleSpinBox()
+        self.gn2_thresh_spin.setRange(0, 10000)
+        self.gn2_thresh_spin.setDecimals(1)
+        self.gn2_thresh_spin.setSuffix(" psi")
+        self.gn2_thresh_spin.valueChanged.connect(lambda v: self._on_threshold_changed("gn2_thresh_psi", v))
+        thresh_form.addRow("GN2 THRESH (→ GN2 Press):", self.gn2_thresh_spin)
+        self.fuel_thresh_spin = QtWidgets.QDoubleSpinBox()
+        self.fuel_thresh_spin.setRange(0, 10000)
+        self.fuel_thresh_spin.setDecimals(1)
+        self.fuel_thresh_spin.setSuffix(" psi")
+        self.fuel_thresh_spin.valueChanged.connect(lambda v: self._on_threshold_changed("fuel_thresh_psi", v))
+        thresh_form.addRow("Fuel THRESH (→ Fuel Press):", self.fuel_thresh_spin)
+        self.ox_thresh_spin = QtWidgets.QDoubleSpinBox()
+        self.ox_thresh_spin.setRange(0, 10000)
+        self.ox_thresh_spin.setDecimals(1)
+        self.ox_thresh_spin.setSuffix(" psi")
+        self.ox_thresh_spin.valueChanged.connect(lambda v: self._on_threshold_changed("ox_thresh_psi", v))
+        thresh_form.addRow("Ox THRESH (→ Ox Press):", self.ox_thresh_spin)
+        thresh_group.setLayout(thresh_form)
+        pt_layout.addWidget(thresh_group)
         
-        # Populate PT inputs based on calibration
-        for pt_id in sorted(self.sensor_widget.pt_calibration.keys()):
-            le = QtWidgets.QLineEdit()
-            le.textChanged.connect(lambda txt, idx=pt_id: self.on_pt_name_changed(idx, txt))
-            self.pt_form.addRow(f"PT {pt_id}:", le)
-            self.pt_inputs[pt_id] = le
-            
-        self.pt_scroll.setWidget(self.pt_scroll_widget)
-        self.pt_scroll.setWidgetResizable(True)
-        pt_layout.addWidget(self.pt_scroll)
+        # PT role → connector (same pattern as actuators)
+        pt_layout.addWidget(QtWidgets.QLabel("PT role → connector:"))
+        self.pt_form_widget = QtWidgets.QWidget()
+        self.pt_form = QtWidgets.QFormLayout(self.pt_form_widget)
+        self.pt_inputs = {}  # role_name -> QComboBox (pt_id 0=None, else PT 1-10)
+        for role_name in CONFIG.get_sensor_role_names():
+            combo = QtWidgets.QComboBox()
+            combo.addItem("—", 0)
+            for pt_id in range(1, NUM_CONNECTORS + 1):
+                combo.addItem(f"PT {pt_id}", pt_id)
+            combo.currentIndexChanged.connect(lambda idx, rn=role_name, c=combo: self.on_pt_role_changed(rn, c))
+            self.pt_form.addRow(role_name + ":", combo)
+            self.pt_inputs[role_name] = combo
+        pt_layout.addWidget(self.pt_form_widget)
         
         pt_group.setLayout(pt_layout)
         right_col.addWidget(pt_group)
-        main_layout.addLayout(right_col, 1)
+        right_col.addStretch()
+        
+        # Wrap right column in scroll area
+        right_scroll = QtWidgets.QScrollArea()
+        right_scroll.setWidget(right_col_widget)
+        right_scroll.setWidgetResizable(True)
+        main_layout.addWidget(right_scroll, 1)
 
     def load_values(self):
         # Sensor
@@ -1731,6 +3132,29 @@ class SettingsWidget(QtWidgets.QWidget):
             
         with QtCore.QSignalBlocker(self.ip_filter):
             self.ip_filter.setText(self.sensor_widget.filter_source_ip)
+        
+        # Load PT calibration CSV paths (support both list and single string for backward compatibility)
+        p = (CONFIG.config.get("paths") or {}).get("pt_calibration_csv", "")
+        csv_paths = []
+        if isinstance(p, list):
+            csv_paths = [str(path).strip() for path in p if path and str(path).strip()]
+        elif isinstance(p, str) and p.strip():
+            csv_paths = [p.strip()]
+        
+        with QtCore.QSignalBlocker(self.pt_calibration_csv_list):
+            self.pt_calibration_csv_list.clear()
+            for path in csv_paths:
+                self.pt_calibration_csv_list.addItem(path)
+        
+        # Update error label if there's an error
+        if hasattr(self.sensor_widget, 'pt_calibration_error') and self.sensor_widget.pt_calibration_error:
+            self.pt_calibration_error_label.setText(self.sensor_widget.pt_calibration_error)
+            self.pt_calibration_error_label.setVisible(True)
+        else:
+            self.pt_calibration_error_label.setVisible(False)
+        
+        with QtCore.QSignalBlocker(self.only_show_pt_with_roles_chk):
+            self.only_show_pt_with_roles_chk.setChecked(self.sensor_widget.only_show_pt_with_roles)
             
         with QtCore.QSignalBlocker(self.adc_bits_spin):
             self.adc_bits_spin.setValue(self.sensor_widget.adc_bits)
@@ -1738,30 +3162,140 @@ class SettingsWidget(QtWidgets.QWidget):
         with QtCore.QSignalBlocker(self.ref_volt_spin):
             self.ref_volt_spin.setValue(self.sensor_widget.reference_voltage)
         
+        with QtCore.QSignalBlocker(self.graph_ma_spin):
+            self.graph_ma_spin.setValue(self.sensor_widget.graph_moving_avg_samples)
+        with QtCore.QSignalBlocker(self.display_ma_spin):
+            self.display_ma_spin.setValue(self.sensor_widget.display_moving_avg_samples)
+        
+        for i in range(1, NUM_CONNECTORS + 1):
+            if i in self.plot_visibility_cbs:
+                with QtCore.QSignalBlocker(self.plot_visibility_cbs[i]):
+                    self.plot_visibility_cbs[i].setChecked(self.sensor_widget.plot_enabled.get(i, True))
+        
         # Actuator
         with QtCore.QSignalBlocker(self.act_ip):
             self.act_ip.setText(self.actuator_widget.device_ip)
             
         with QtCore.QSignalBlocker(self.act_port):
             self.act_port.setValue(self.actuator_widget.device_port)
-            
-        for i, le in self.act_inputs.items():
-            with QtCore.QSignalBlocker(le):
-                le.setText(self.actuator_widget.actuator_labels.get(i, ""))
-            
-        # PT
-        for i, le in self.pt_inputs.items():
-            with QtCore.QSignalBlocker(le):
-                le.setText(self.sensor_widget.sensor_labels.get(i, ""))
         
-        # Mappings
-        for name, combo in self.combos.items():
-            pt_id = CONFIG.config["mappings"].get(name, 0)
-            idx = combo.findData(pt_id)
-            if idx >= 0:
-                with QtCore.QSignalBlocker(combo):
-                    combo.setCurrentIndex(idx)
+        with QtCore.QSignalBlocker(self.only_show_actuators_with_roles_chk):
+            self.only_show_actuators_with_roles_chk.setChecked(self.actuator_widget.only_show_actuators_with_roles)
             
+        # Actuator roles: load from config (role → actuator id)
+        for role_name, combo in self.act_inputs.items():
+            with QtCore.QSignalBlocker(combo):
+                actuator_id = CONFIG.get_actuator_role(role_name)
+                idx = combo.findData(actuator_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                else:
+                    combo.setCurrentIndex(0)
+            
+        # PT roles: load from config (role → connector id)
+        for role_name, combo in self.pt_inputs.items():
+            with QtCore.QSignalBlocker(combo):
+                pt_id = CONFIG.get_sensor_role(role_name)
+                idx = combo.findData(pt_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                else:
+                    combo.setCurrentIndex(0)
+        
+        # Mappings (refresh list from current pt_calibration then restore selection)
+        self._refresh_pt_mapping_combos()
+        
+        # Pressure limits (THRESH and POP from pressure_limits)
+        pl = CONFIG.config.get("pressure_limits", {})
+        key_to_fluid_limit = [
+            ("gn2_pop_psi", "GN2", "POP"),
+            ("fuel_pop_psi", "ETH", "POP"),
+            ("ox_pop_psi", "LOX", "POP"),
+            ("gn2_thresh_psi", "GN2", "THRESH"),
+            ("fuel_thresh_psi", "ETH", "THRESH"),
+            ("ox_thresh_psi", "LOX", "THRESH"),
+        ]
+        for key, fluid, limit in key_to_fluid_limit:
+            spin = getattr(self, key.replace("_psi", "_spin"))
+            default = 100.0 if limit == "POP" else 10.0
+            val = pl.get(fluid, {}).get(limit, default)
+            with QtCore.QSignalBlocker(spin):
+                spin.setValue(float(val))
+            
+    def _refresh_pt_mapping_combos(self):
+        """Repopulate GN2/ETH/LOX source combos from current pt_calibration and restore selection from config."""
+        for name, combo in self.combos.items():
+            with QtCore.QSignalBlocker(combo):
+                combo.clear()
+                combo.addItem("None", 0)
+                for pt_id in sorted(self.sensor_widget.pt_calibration.keys()):
+                    combo.addItem(f"PT {pt_id}", pt_id)
+                pt_id = CONFIG.config["mappings"].get(name, 0)
+                idx = combo.findData(pt_id)
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+    
+    def _update_pt_calibration_csv_config(self):
+        """Update config with current list of CSV paths."""
+        paths = []
+        for i in range(self.pt_calibration_csv_list.count()):
+            item = self.pt_calibration_csv_list.item(i)
+            if item and item.text().strip():
+                paths.append(item.text().strip())
+        CONFIG.config.setdefault("paths", {})["pt_calibration_csv"] = paths if paths else []
+        CONFIG.save()
+        self.sensor_widget.reload_pt_calibration()
+        self._refresh_pt_mapping_combos()
+        
+        # Update error label
+        if hasattr(self.sensor_widget, 'pt_calibration_error') and self.sensor_widget.pt_calibration_error:
+            self.pt_calibration_error_label.setText(self.sensor_widget.pt_calibration_error)
+            self.pt_calibration_error_label.setVisible(True)
+        else:
+            self.pt_calibration_error_label.setVisible(False)
+    
+    def on_pt_calibration_csv_add(self):
+        """Add a new CSV file to the list."""
+        # Get last directory from list or use home directory
+        last_path = ""
+        if self.pt_calibration_csv_list.count() > 0:
+            last_item = self.pt_calibration_csv_list.item(self.pt_calibration_csv_list.count() - 1)
+            if last_item:
+                last_path = os.path.dirname(last_item.text()) if os.path.dirname(last_item.text()) else os.path.expanduser("~")
+        else:
+            last_path = os.path.expanduser("~")
+        
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select PT calibration CSV",
+            last_path,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if path:
+            self.pt_calibration_csv_list.addItem(path)
+            self._update_pt_calibration_csv_config()
+    
+    def on_pt_calibration_csv_remove(self):
+        """Remove selected CSV file from the list."""
+        current_item = self.pt_calibration_csv_list.currentItem()
+        if current_item:
+            row = self.pt_calibration_csv_list.row(current_item)
+            self.pt_calibration_csv_list.takeItem(row)
+            self._update_pt_calibration_csv_config()
+    
+    def _on_threshold_changed(self, key: str, value: float):
+        key_to_fluid_limit = {
+            "gn2_pop_psi": ("GN2", "POP"),
+            "fuel_pop_psi": ("ETH", "POP"),
+            "ox_pop_psi": ("LOX", "POP"),
+            "gn2_thresh_psi": ("GN2", "THRESH"),
+            "fuel_thresh_psi": ("ETH", "THRESH"),
+            "ox_thresh_psi": ("LOX", "THRESH"),
+        }
+        fluid, limit = key_to_fluid_limit.get(key, (None, None))
+        if fluid is not None:
+            CONFIG.config.setdefault("pressure_limits", {}).setdefault(fluid, {})[limit] = value
+            CONFIG.save()
+
     def on_time_changed(self, val):
         self.time_lbl.setText(f"{val}s")
         self.sensor_widget.window_seconds = float(val)
@@ -1783,6 +3317,14 @@ class SettingsWidget(QtWidgets.QWidget):
         CONFIG.config["network"]["sensor_ip_filter"] = text
         CONFIG.save()
 
+    def on_only_show_pt_with_roles_changed(self, checked):
+        self.sensor_widget.only_show_pt_with_roles = checked
+        CONFIG.config["display"]["only_show_pt_with_roles"] = checked
+        CONFIG.save()
+        # Trigger immediate update of plots and under-graph display
+        self.sensor_widget.update_plots()
+        self.sensor_widget.update_statistics()
+
     def on_adc_bits_changed(self, val):
         self.sensor_widget.adc_bits = val
         CONFIG.config["display"]["adc_bits"] = val
@@ -1791,6 +3333,16 @@ class SettingsWidget(QtWidgets.QWidget):
     def on_ref_volt_changed(self, val):
         self.sensor_widget.reference_voltage = val
         CONFIG.config["display"]["ref_voltage"] = val
+        CONFIG.save()
+
+    def on_graph_ma_changed(self, val):
+        self.sensor_widget.on_graph_moving_avg_changed(val)
+        CONFIG.config["display"]["graph_ma_samples"] = val
+        CONFIG.save()
+
+    def on_display_ma_changed(self, val):
+        self.sensor_widget.on_display_moving_avg_changed(val)
+        CONFIG.config["display"]["display_ma_samples"] = val
         CONFIG.save()
 
     def on_act_ip_changed(self, text):
@@ -1803,16 +3355,38 @@ class SettingsWidget(QtWidgets.QWidget):
         CONFIG.config["network"]["actuator_port"] = val
         CONFIG.save()
 
-    def on_actuator_name_changed(self, actuator_id, text):
-        self.actuator_widget.on_label_changed(actuator_id, text)
+    def on_only_show_actuators_with_roles_changed(self, checked):
+        self.actuator_widget.only_show_actuators_with_roles = checked
+        CONFIG.config["display"]["only_show_actuators_with_roles"] = checked
+        CONFIG.save()
+        # Trigger immediate update of actuator visibility
+        self.actuator_widget.update_actuator_visibility()
+
+    def on_actuator_role_changed(self, role_name, combo):
+        actuator_id = combo.currentData()
+        if actuator_id is None:
+            actuator_id = 0
+        CONFIG.set_actuator_role(role_name, actuator_id)
+        # Refresh widget labels from config
+        for aid in range(1, NUM_ACTUATORS + 1):
+            label = CONFIG.get_actuator_label(aid)
+            self.actuator_widget.actuator_labels[aid] = label
+            self.actuator_widget.update_label_display(aid, label)
+        # Update visibility if filtering is enabled
+        if self.actuator_widget.only_show_actuators_with_roles:
+            self.actuator_widget.update_actuator_visibility()
         
-    def on_pt_name_changed(self, pt_id, text):
-        self.sensor_widget.on_sensor_label_changed(pt_id, text)
-        self.update_combo_text(pt_id, text)
-        
-    def update_combo_text(self, pt_id, label):
-        # Update ComboBox user-visible text if needed (optional polish)
-        pass
+    def on_pt_role_changed(self, role_name, combo):
+        pt_id = combo.currentData()
+        if pt_id is None:
+            pt_id = 0
+        CONFIG.set_sensor_role(role_name, pt_id)
+        # Refresh widget labels from config
+        for cid in range(1, NUM_CONNECTORS + 1):
+            label = CONFIG.get_sensor_label(cid)
+            self.sensor_widget.sensor_labels[cid] = label
+            if cid in self.sensor_widget.sensor_plots:
+                self.sensor_widget.update_plot_legend(cid)
 
     def on_mapping_changed(self, gauge_name, combo):
         pt_id = combo.currentData()
@@ -1846,6 +3420,30 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
     def __init__(self, receiver, device_ip: str = DEFAULT_ACTUATOR_IP, device_port: int = DEFAULT_DEVICE_PORT, bind_address: str = '0.0.0.0'):
         super().__init__()
         self.setWindowTitle("Diablo Avionics – Sensor & Actuator")
+        # Event log storage: list of (time, type, details)
+        self.event_log: List[Tuple[float, str, str]] = []
+        
+        # Load state machine CSV
+        self.state_machine = load_state_machine_csv(CONFIG.get_state_machine_csv_path())
+        
+        # Map mode button names to CSV state names (keep order in sync with CSV header and TopBarWidget)
+        self.mode_to_state_map = {
+            "Idle": "Idle",
+            "Armed": "Armed",
+            "Fuel Fill": "Fuel Fill",
+            "Ox Fill": "Ox Fill",
+            "Quick Fire": "Quick Fire",
+            "GN2 Press": "GN2 Press",
+            "Fuel Press": "Fuel Press",
+            "Fuel Vent": "Fuel Vent",
+            "Ox Press": "Ox Press",
+            "Ox Vent": "Ox Vent",
+            "High Press": "High Press",
+            "GN2 Vent": "GN2 Vent",
+            "Fire": "Fire",
+            "Vent": "Vent",
+            "Abort": "Abort",
+        }
         
         # Central widget container
         central_widget = QtWidgets.QWidget()
@@ -1859,6 +3457,8 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         # Top Bar
         self.top_bar_widget = TopBarWidget(self)
         self.top_bar_widget.navigation_requested.connect(self.on_navigation_requested)
+        self.top_bar_widget.mode_changed.connect(self.on_mode_changed)
+        self.top_bar_widget.debug_toggled.connect(self.on_debug_toggled)
         main_layout.addWidget(self.top_bar_widget)
         
         # Stacked Widget for Dashboard / Settings
@@ -1871,7 +3471,9 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         
         self.sensor_widget = SensorPlotWidget(receiver, bind_address, self)
         self.actuator_widget = ActuatorControlWidget(receiver, device_ip, device_port, self)
-        
+        self.sensor_widget.main_window_ref = self
+        self.actuator_widget.main_window_ref = self
+
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.addWidget(self.sensor_widget)
         splitter.addWidget(self.actuator_widget)
@@ -1896,18 +3498,133 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         self.update_timer = QtCore.QTimer(self)
         self.update_timer.timeout.connect(self.update_top_bar)
         self.update_timer.start(100)
+
+        self._apply_bar_limits()
     
+    def _apply_bar_limits(self):
+        """Apply NOP, MEOP, POP, THRESH and shared scale_max to top bar gauges (bottom=0, same scale)."""
+        pl = CONFIG.config.get("pressure_limits", {})
+        pops = [float(pl.get(f, {}).get("POP", 750)) for f in ("GN2", "ETH", "LOX")]
+        scale_max = max(1.25 * p for p in pops) if pops else 1000.0
+        scale_max = max(scale_max, 1.0)
+        for fluid, bar in [("GN2", self.top_bar_widget.bar_gn2), ("ETH", self.top_bar_widget.bar_eth), ("LOX", self.top_bar_widget.bar_lox)]:
+            d = pl.get(fluid, {})
+            nop = float(d.get("NOP", 600))
+            meop = float(d.get("MEOP", 650))
+            pop = float(d.get("POP", 750))
+            thresh = float(d.get("THRESH", 400))
+            bar.set_limits(nop, meop, pop, thresh, scale_max=scale_max)
+
     def on_navigation_requested(self, view_name):
         if view_name == "settings":
             self.settings_widget.load_values() # Refresh values on enter
             self.stack.setCurrentWidget(self.settings_widget)
         else:
+            self._apply_bar_limits()
             self.stack.setCurrentIndex(0) # Dashboard
+    
+    def on_debug_toggled(self, enabled: bool):
+        """Handle DEBUG button toggle - enable/disable manual actuator control"""
+        if hasattr(self, 'actuator_widget') and self.actuator_widget:
+            self.actuator_widget.manual_control_enabled = enabled
+            print(f"DEBUG mode: Manual control {'enabled' if enabled else 'disabled'}")
+        else:
+            print(f"Warning: actuator_widget not available when DEBUG toggled")
+    
+    def on_mode_changed(self, mode_name: str):
+        """Handle mode button change - apply state from CSV and log event"""
+        relative_time = time.time() - self.sensor_widget.stats_start_time
+        self.log_event("Mode Changed", mode_name)
+        
+        # Manual control is now controlled by DEBUG button, not by state selection
+        # (DEBUG button handler sets manual_control_enabled)
+        
+        # Map mode name to CSV state name
+        csv_state_name = self.mode_to_state_map.get(mode_name, mode_name)
+        
+        # Apply actuator states from CSV
+        if self.state_machine:
+            apply_state_from_csv(self.actuator_widget, csv_state_name, self.state_machine)
+        else:
+            print(f"Warning: State machine not loaded, cannot apply state for '{mode_name}'")
+    
+    def log_event(self, event_type: str, details: str):
+        """Log an event with current relative time"""
+        relative_time = time.time() - self.sensor_widget.stats_start_time
+        self.event_log.append((relative_time, event_type, details))
+    
+    def get_event_log(self):
+        """Get the event log, filtered by settings"""
+        filtered_events = []
+        for event_time, event_type, details in self.event_log:
+            # Filter actuator events if only_show_actuators_with_roles is enabled
+            if event_type == "Actuator State Change" and self.actuator_widget.only_show_actuators_with_roles:
+                # Extract actuator ID from details (format: "Actuator X: ..." or "Actuator X (label): ...")
+                import re
+                match = re.match(r"Actuator (\d+)", details)
+                if match:
+                    actuator_id = int(match.group(1))
+                    # Check if this actuator has a role (non-empty label)
+                    label = self.actuator_widget.actuator_labels.get(actuator_id, "")
+                    if not label or label.strip() == "":
+                        continue  # Skip this event
+            filtered_events.append((event_time, event_type, details))
+        return filtered_events
             
     def on_mapping_changed(self, gauge_name, pt_id):
         self.gauge_map[gauge_name] = pt_id # Update local map for internal timer use
         # CONFIG save is handled in settings_widget
         
+    def _get_gauge_pressure(self, gauge_name: str) -> float:
+        """Return latest pressure (psi) for the given gauge (GN2, ETH, LOX), or 0.0 if no data."""
+        pt_id = self.gauge_map.get(gauge_name, 0)
+        if pt_id <= 0 or pt_id not in self.sensor_widget.sensor_psi_data:
+            return 0.0
+        deque_data = self.sensor_widget.sensor_psi_data[pt_id]
+        if len(deque_data) == 0:
+            return 0.0
+        return deque_data[-1][1]
+
+    def _check_auto_state_transitions(self):
+        """If current state and pressures meet threshold rules, automatically transition state."""
+        if self.top_bar_widget.unlock_states:
+            return  # In DEBUG mode, no automatic transitions
+        current = self.top_bar_widget.current_state
+        if current is None:
+            return
+        pl = CONFIG.config.get("pressure_limits", {})
+        gn2_psi = self._get_gauge_pressure("GN2")
+        fuel_psi = self._get_gauge_pressure("ETH")
+        ox_psi = self._get_gauge_pressure("LOX")
+        gn2_pop = float(pl.get("GN2", {}).get("POP", 100.0))
+        fuel_pop = float(pl.get("ETH", {}).get("POP", 100.0))
+        ox_pop = float(pl.get("LOX", {}).get("POP", 100.0))
+        gn2_thresh = float(pl.get("GN2", {}).get("THRESH", 10.0))
+        fuel_thresh = float(pl.get("ETH", {}).get("THRESH", 10.0))
+        ox_thresh = float(pl.get("LOX", {}).get("THRESH", 10.0))
+        # Press → Vent when pressure above POP
+        if current == "GN2 Press" and gn2_psi >= gn2_pop:
+            self.top_bar_widget.request_state("GN2 Vent")
+            return
+        if current == "Fuel Press" and fuel_psi >= fuel_pop:
+            self.top_bar_widget.request_state("Fuel Vent")
+            return
+        if current == "Ox Press" and ox_psi >= ox_pop:
+            self.top_bar_widget.request_state("Ox Vent")
+            return
+        if current == "High Press" and gn2_psi >= gn2_pop:
+            self.top_bar_widget.request_state("GN2 Vent")
+            return
+        # Vent → Press when pressure below THRESH
+        if current == "GN2 Vent" and gn2_psi <= gn2_thresh:
+            self.top_bar_widget.request_state("GN2 Press")
+            return
+        if current == "Fuel Vent" and fuel_psi <= fuel_thresh:
+            self.top_bar_widget.request_state("Fuel Press")
+            return
+        if current == "Ox Vent" and ox_psi <= ox_thresh:
+            self.top_bar_widget.request_state("Ox Press")
+
     def update_top_bar(self):
         # Poll sensor widget for latest PSI values
         # Accessing private data sensor_psi_data directly for simplicity given the code structure
@@ -1924,6 +3641,7 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
                 self.top_bar_widget.bar_eth.set_value(val)
             elif gauge == "LOX":
                 self.top_bar_widget.bar_lox.set_value(val)
+        self._check_auto_state_transitions()
     
     def closeEvent(self, event):
         """Handle window close: save labels and close actuator socket."""
