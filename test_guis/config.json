@@ -63,7 +63,7 @@
         "y_axis_min": 0.0,
         "y_axis_max": 700.0,
         "y_axis_autoscale": true,
-        "only_show_actuators_with_roles": true,
+        "only_show_actuators_with_roles": false,
         "only_show_pt_with_roles": true,
         "graph_ma_samples": 1,
         "display_ma_samples": 1
