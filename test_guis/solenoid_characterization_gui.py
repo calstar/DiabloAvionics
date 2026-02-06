@@ -782,10 +782,14 @@ class FullPlotWindow(QtWidgets.QMainWindow):
 
         # --- Results table (bottom 35%) ---
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels([
-            "Pair #", "Open Delay (s)", "Open Time (s)", "ΔP Open (psi)",
-            "Close Delay (s)", "Close Time (s)", "ΔP Close (psi)"
+            "Pair #", 
+            "Open Cmd (s)", "Open Start (s)", "Open End (s)",
+            "Close Cmd (s)", "Close Start (s)", "Close End (s)",
+            "Open Delay dT (s)", "Open Full dT (s)", 
+            "Close Delay dT (s)", "Close Full dT (s)",
+            "Total dP (psi)"
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -867,6 +871,7 @@ class FullPlotWindow(QtWidgets.QMainWindow):
                 P_close_post = result.get("P_close_post")
                 result["delta_P_open"] = (P_open_pre - P_open_post) if (P_open_pre is not None and P_open_post is not None) else None
                 result["delta_P_close"] = (P_close_post - P_close_pre) if (P_close_post is not None and P_close_pre is not None) else None
+                result["total_dP"] = (P_open_pre - P_close_post) if (P_open_pre is not None and P_close_post is not None) else None
                 self.timing_results.append(result)
             except ValueError:
                 # Skip pairs that fail analysis (e.g., not enough data)
@@ -907,12 +912,19 @@ class FullPlotWindow(QtWidgets.QMainWindow):
         # Per-pair rows
         for i, result in enumerate(self.timing_results):
             self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(_fmt(result.get("open_delay"))))
-            self.table.setItem(i, 2, QtWidgets.QTableWidgetItem(_fmt(result.get("open_time"))))
-            self.table.setItem(i, 3, QtWidgets.QTableWidgetItem(_fmt(result.get("delta_P_open"), 2)))
-            self.table.setItem(i, 4, QtWidgets.QTableWidgetItem(_fmt(result.get("close_delay"))))
-            self.table.setItem(i, 5, QtWidgets.QTableWidgetItem(_fmt(result.get("close_time"))))
-            self.table.setItem(i, 6, QtWidgets.QTableWidgetItem(_fmt(result.get("delta_P_close"), 2)))
+            # Timestamps
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(_fmt(result.get("t_open_cmd"))))
+            self.table.setItem(i, 2, QtWidgets.QTableWidgetItem(_fmt(result.get("t_open_start"))))
+            self.table.setItem(i, 3, QtWidgets.QTableWidgetItem(_fmt(result.get("t_open_end"))))
+            self.table.setItem(i, 4, QtWidgets.QTableWidgetItem(_fmt(result.get("t_close_cmd"))))
+            self.table.setItem(i, 5, QtWidgets.QTableWidgetItem(_fmt(result.get("t_close_start"))))
+            self.table.setItem(i, 6, QtWidgets.QTableWidgetItem(_fmt(result.get("t_close_end"))))
+            # Delays & dP
+            self.table.setItem(i, 7, QtWidgets.QTableWidgetItem(_fmt(result.get("open_delay"))))
+            self.table.setItem(i, 8, QtWidgets.QTableWidgetItem(_fmt(result.get("open_time"))))
+            self.table.setItem(i, 9, QtWidgets.QTableWidgetItem(_fmt(result.get("close_delay"))))
+            self.table.setItem(i, 10, QtWidgets.QTableWidgetItem(_fmt(result.get("close_time"))))
+            self.table.setItem(i, 11, QtWidgets.QTableWidgetItem(_fmt(result.get("total_dP"), 2)))
 
         # Averages row
         def _avg(key):
@@ -923,17 +935,20 @@ class FullPlotWindow(QtWidgets.QMainWindow):
         avg_label = QtWidgets.QTableWidgetItem("AVG")
         avg_label.setFont(QtGui.QFont("", -1, QtGui.QFont.Weight.Bold))
         self.table.setItem(avg_row, 0, avg_label)
-        self.table.setItem(avg_row, 1, QtWidgets.QTableWidgetItem(_fmt(_avg("open_delay"))))
-        self.table.setItem(avg_row, 2, QtWidgets.QTableWidgetItem(_fmt(_avg("open_time"))))
-        self.table.setItem(avg_row, 3, QtWidgets.QTableWidgetItem(_fmt(_avg("delta_P_open"), 2)))
-        self.table.setItem(avg_row, 4, QtWidgets.QTableWidgetItem(_fmt(_avg("close_delay"))))
-        self.table.setItem(avg_row, 5, QtWidgets.QTableWidgetItem(_fmt(_avg("close_time"))))
-        self.table.setItem(avg_row, 6, QtWidgets.QTableWidgetItem(_fmt(_avg("delta_P_close"), 2)))
+        # Skip averaging absolute timestamps (cols 1-6)
+        for c in range(1, 7):
+            self.table.setItem(avg_row, c, QtWidgets.QTableWidgetItem(""))
+            
+        self.table.setItem(avg_row, 7, QtWidgets.QTableWidgetItem(_fmt(_avg("open_delay"))))
+        self.table.setItem(avg_row, 8, QtWidgets.QTableWidgetItem(_fmt(_avg("open_time"))))
+        self.table.setItem(avg_row, 9, QtWidgets.QTableWidgetItem(_fmt(_avg("close_delay"))))
+        self.table.setItem(avg_row, 10, QtWidgets.QTableWidgetItem(_fmt(_avg("close_time"))))
+        self.table.setItem(avg_row, 11, QtWidgets.QTableWidgetItem(_fmt(_avg("total_dP"), 2)))
 
         # Bold the averages row and set distinct background color for readability
         avg_bg = QtGui.QColor(40, 60, 80)  # Dark blue-gray
         avg_fg = QtGui.QColor(255, 255, 255)  # White text
-        for col in range(7):
+        for col in range(12):
             item = self.table.item(avg_row, col)
             if item:
                 font = item.font()
@@ -1041,6 +1056,11 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
 
         self.actuator_events: List[Tuple[float, str]] = []  # (t_sec, "open"|"closed")
         self.event_lines: List[pg.InfiniteLine] = []
+        
+        # Board Sync state
+        self.board_t0_ms: Optional[int] = None
+        # (board_accum_ms, wall_time_sec) for the latest received packet
+        self.last_sync_params: Optional[Tuple[float, float]] = None
 
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -1096,6 +1116,12 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         if self.actuator_combo.count() == 0:
             for aid in range(1, NUM_ACTUATORS + 1):
                 self.actuator_combo.addItem(f"Actuator {aid}", aid)
+        
+        # Default to Actuator 7 if present
+        idx_7 = self.actuator_combo.findData(7)
+        if idx_7 >= 0:
+            self.actuator_combo.setCurrentIndex(idx_7)
+            
         self.actuator_combo.currentIndexChanged.connect(self._on_actuator_changed)
         top.addWidget(self.actuator_combo)
 
@@ -1352,39 +1378,57 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         max_code = 2 ** (self.adc_bits - 1)
         return (code_int32 * self.reference_voltage) / max_code
 
+    def get_current_board_time(self) -> float:
+        """Estimate current board time (in seconds relative to board_t0) using last sync."""
+        if self.board_t0_ms is None or self.last_sync_params is None:
+            # Fallback if no data yet: just use wall clock relative to start
+            return time.time() - self.stats_start_time
+        
+        last_board_ms, last_wall_sec = self.last_sync_params
+        now_wall = time.time()
+        elapsed_sec = now_wall - last_wall_sec
+        # Estimate: board time has advanced by same amount as wall time since last packet
+        current_board_ms = last_board_ms + (elapsed_sec * 1000.0)
+        return (current_board_ms - self.board_t0_ms) / 1000.0
+
     def on_status_update(self, message: str):
         self.status_label.setText(message)
 
     def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
         if source_ip != self.filter_source_ip:
             return
-        # Use packet arrival time (wall clock) for sample timestamps.
-        # This ensures ADC samples and command events share the same time coordinate.
-        arrival_t = time.time() - self.stats_start_time
+        
         dt_sec = 1.0 / SAMPLE_RATE_HZ
-        
-        # Count total samples in this packet to distribute times ending at arrival
-        total_samples = sum(len(chunk["datapoints"]) for chunk in chunks)
-        if total_samples == 0:
-            return
-        
-        # Samples span (total_samples * dt_sec) seconds, ending at arrival_t.
-        # First sample was taken (total_samples - 1) * dt_sec ago.
-        sample_idx = 0
+        arrival_wall_time = time.time()
+
         for chunk in chunks:
-            for dp in chunk["datapoints"]:
-                # Assign time: samples spaced at dt_sec, last sample at arrival_t
-                sample_time = arrival_t - (total_samples - 1 - sample_idx) * dt_sec
+            chunk_ts_ms = chunk["timestamp"]
+            if self.board_t0_ms is None:
+                self.board_t0_ms = chunk_ts_ms
+            
+            # Base time for this chunk in plot seconds (relative to first packet)
+            # Timestamp corresponds to START of chunk (based on firmware logic)
+            chunk_base_sec = (chunk_ts_ms - self.board_t0_ms) / 1000.0
+            
+            # Identify the latest sample time in this chunk for sync update
+            last_sample_ms = chunk_ts_ms + (len(chunk["datapoints"]) - 1) * dt_sec * 1000.0
+
+            for i, dp in enumerate(chunk["datapoints"]):
+                # Sample time based entirely on board crystal (timestamp + index)
+                sample_time = chunk_base_sec + i * dt_sec
+                
                 sensor_id = dp["sensor_id"]
                 if sensor_id not in self.sensor_data:
                     self.sensor_data[sensor_id] = deque(maxlen=MAX_POINTS)
                     self.sensor_adc_codes[sensor_id] = deque(maxlen=MAX_POINTS)
                     if sensor_id in self.pt_calibration:
                         self.sensor_psi_data[sensor_id] = deque(maxlen=MAX_POINTS)
-                # Keep t strictly increasing if packets overlap or arrive out of order.
+                
+                # Enforce monotonicity in case of timestamp jitter/resets (though rare with millis)
                 deq = self.sensor_data[sensor_id]
                 if len(deq) > 0 and sample_time <= deq[-1][0]:
-                    sample_time = deq[-1][0] + dt_sec
+                     sample_time = deq[-1][0] + dt_sec
+
                 code_uint32 = dp["data"]
                 voltage = self.code_to_voltage(code_uint32)
                 self.sensor_data[sensor_id].append((sample_time, voltage))
@@ -1393,7 +1437,10 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
                     a, b, c, d = self.pt_calibration[sensor_id]
                     psi = calculate_pressure(code_uint32, a, b, c, d)
                     self.sensor_psi_data[sensor_id].append((sample_time, psi))
-                sample_idx += 1
+            
+            # Update sync params with the effective board time of the last processed sample
+            # and the current wall time.
+            self.last_sync_params = (last_sample_ms, arrival_wall_time)
 
     def _send_actuator_command(self, actuator_id: int, hardware_command: int):
         try:
@@ -1417,7 +1464,8 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         aid = self.get_selected_actuator_id()
         if not aid:
             return
-        t_sec = time.time() - self.stats_start_time
+        # Use estimated board time for event
+        t_sec = self.get_current_board_time()
         actuator_type = CONFIG.get_actuator_type_by_id(aid)
         if actuator_type == 'NO':
             hardware_command = 0
@@ -1430,7 +1478,8 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         aid = self.get_selected_actuator_id()
         if not aid:
             return
-        t_sec = time.time() - self.stats_start_time
+        # Use estimated board time for event
+        t_sec = self.get_current_board_time()
         actuator_type = CONFIG.get_actuator_type_by_id(aid)
         if actuator_type == 'NO':
             hardware_command = 1
@@ -1518,7 +1567,7 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         if self.pwm_last_state != hardware_command:
             self._send_actuator_command(self.pwm_actuator_id, hardware_command)
             self.pwm_last_state = hardware_command
-            t_sec = time.time() - self.stats_start_time
+            t_sec = self.get_current_board_time()
             self._add_event_line(t_sec, "open" if should_be_open else "closed")
 
     def on_pause_clicked(self):
