@@ -1595,7 +1595,7 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
             self.pt_curve.setData([], [])
             self.pt_readout.setText("")
             self.plot_item.setXRange(window_start, current_time, padding=0.02)
-            self._update_timing_display()
+
             return
         psi_deque = self.sensor_psi_data[pt_id]
         if len(psi_deque) == 0:
@@ -1604,7 +1604,7 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
             self.pt_curve.setData([], [])
             self.pt_readout.setText("")
             self.plot_item.setXRange(window_start, current_time, padding=0.02)
-            self._update_timing_display()
+
             return
         # PT sample rate for selected channel: count samples with receive-time in last 1 s
         # (Each (t, psi) is one PT sample; t is relative receive time. So count = samples/sec.)
