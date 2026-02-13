@@ -27,6 +27,16 @@ EthernetUDP udp;
 // Store the current state of each actuator (0 = OFF, 1 = ON)
 uint8_t actuator_states[NUM_ACTUATORS];
 
+// PWM state tracking
+struct PWMState {
+  bool active;
+  unsigned long start_time;
+  uint32_t duration;
+  uint8_t channel;
+};
+
+PWMState pwm_states[NUM_ACTUATORS];
+
 // Sensor data collection
 const uint8_t NUM_SENSORS = NUM_ACTUATORS;  // 10 current sense pins
 unsigned long lastAdcReadTime = 0;
@@ -34,6 +44,8 @@ unsigned long lastAdcReadTime = 0;
 // Forward declarations
 void initializeActuators();
 void processActuatorCommand(const std::vector<Diablo::ActuatorCommand> &commands);
+void processPWMActuatorCommand(const std::vector<Diablo::PWMActuatorCommand> &commands);
+void updatePWM();
 void readCurrentSensePins();
 void sendSensorDataPacket(const Diablo::SensorDataChunkCollection &chunk);
 
@@ -116,22 +128,47 @@ void loop() {
     int bytesRead = udp.read(packetBuffer, MAX_PACKET_SIZE);
     
     if (bytesRead > 0) {
-      // Parse the packet as an actuator command
-      Diablo::PacketHeader header;
-      std::vector<Diablo::ActuatorCommand> commands;
-      
-      if (Diablo::parse_actuator_command_packet(packetBuffer, bytesRead, header, commands)) {
-        Serial.print("Received actuator command packet with ");
-        Serial.print(commands.size());
-        Serial.println(" commands");
+      // Check the packet type from the header
+      Diablo::PacketHeader* header = (Diablo::PacketHeader*)packetBuffer;
+
+      if (header->packet_type == Diablo::PacketType::ACTUATOR_COMMAND) {
+        // Parse the packet as an actuator command
+        Diablo::PacketHeader parsedHeader;
+        std::vector<Diablo::ActuatorCommand> commands;
         
-        // Process the actuator commands
-        processActuatorCommand(commands);
+        if (Diablo::parse_actuator_command_packet(packetBuffer, bytesRead, parsedHeader, commands)) {
+          Serial.print("Received actuator command packet with ");
+          Serial.print(commands.size());
+          Serial.println(" commands");
+          
+          processActuatorCommand(commands);
+        } else {
+          Serial.println("Error: Failed to parse actuator command packet");
+        }
+      } else if (header->packet_type == Diablo::PacketType::PWM_ACTUATOR_COMMAND) {
+        // Parse the packet as a PWM actuator command
+        Diablo::PacketHeader parsedHeader;
+        std::vector<Diablo::PWMActuatorCommand> commands;
+        
+        if (Diablo::parse_pwm_actuator_packet(packetBuffer, bytesRead, parsedHeader, commands)) {
+          Serial.print("Received PWM actuator command packet with ");
+          Serial.print(commands.size());
+          Serial.println(" commands");
+          
+          processPWMActuatorCommand(commands);
+        } else {
+          Serial.println("Error: Failed to parse PWM actuator command packet");
+        }
       } else {
-        Serial.println("Error: Failed to parse actuator command packet");
+        // Unknown packet type
+        // Serial.print("Received unknown packet type: ");
+        // Serial.println((int)header->packet_type);
       }
     }
   }
+
+  // Check for expired PWM commands
+  updatePWM();
 
   // Read current sense pins and send sensor data at regular intervals
   unsigned long currentTime = millis();
@@ -165,6 +202,15 @@ void initializeActuators() {
   }
   
   Serial.println("All actuators initialized to OFF state");
+
+  // Initialize PWM states
+  for (int i = 0; i < NUM_ACTUATORS; i++) {
+    pwm_states[i].active = false;
+    pwm_states[i].start_time = 0;
+    pwm_states[i].duration = 0;
+    // Map actuator index 0-9 to channel 0-9
+    pwm_states[i].channel = i;
+  }
 }
 
 void processActuatorCommand(const std::vector<Diablo::ActuatorCommand> &commands) {
@@ -190,6 +236,16 @@ void processActuatorCommand(const std::vector<Diablo::ActuatorCommand> &commands
     
     // Convert 1-indexed actuator ID to 0-indexed array index
     uint8_t array_index = cmd.actuator_id - 1;
+
+    // Check if PWM is active on this actuator
+    if (pwm_states[array_index].active) {
+      // Stop PWM
+      ledcDetachPin(pin);
+      pwm_states[array_index].active = false;
+      Serial.print("Actuator ");
+      Serial.print(cmd.actuator_id);
+      Serial.println(" PWM interrupted by digital command");
+    }
     
     // Update the actuator if the state has changed
     if (actuator_states[array_index] != new_state) {
@@ -206,6 +262,91 @@ void processActuatorCommand(const std::vector<Diablo::ActuatorCommand> &commands
       Serial.print("Actuator ");
       Serial.print(cmd.actuator_id);
       Serial.println(" already in requested state");
+    }
+  }
+}
+
+void processPWMActuatorCommand(const std::vector<Diablo::PWMActuatorCommand> &commands) {
+  for (const auto &cmd : commands) {
+    // Actuator IDs are 1-indexed (1-10) from the server
+    if (cmd.actuator_id < 1 || cmd.actuator_id > NUM_ACTUATORS) {
+      Serial.print("Warning: Invalid actuator ID for PWM: ");
+      Serial.println(cmd.actuator_id);
+      continue;
+    }
+
+    int pin = getActuatorPin(cmd.actuator_id);
+    if (pin < 0) {
+      Serial.print("Warning: Failed to get pin for actuator ID: ");
+      Serial.println(cmd.actuator_id);
+      continue;
+    }
+
+    uint8_t array_index = cmd.actuator_id - 1;
+    uint8_t channel = pwm_states[array_index].channel;
+
+    // ESP32-S3 only has 8 LEDC channels (0-7)
+    if (channel > 7) {
+        Serial.print("Error: Actuator ");
+        Serial.print(cmd.actuator_id);
+        Serial.println(" cannot use PWM (Channel > 7)");
+        continue;
+    }
+
+    // Configure LEDC channel
+    // Frequency in Hz, resolution in bits (14 bits = 0-16383 for better low-frequency support)
+    // 10Hz with 14-bit resolution -> div = 80M / (10 * 16384) = ~488 (fits in divider)
+    ledcSetup(channel, cmd.frequency, 14);
+    ledcAttachPin(pin, channel);
+
+    // Calculate duty cycle value (0-16383)
+    // cmd.duty_cycle is 0.0 - 1.0
+    uint32_t max_duty = 16383; // 2^14 - 1
+    uint32_t duty = (uint32_t)(cmd.duty_cycle * (float)max_duty);
+    if (duty > max_duty) duty = max_duty;
+
+    ledcWrite(channel, duty);
+
+    // Update state
+    pwm_states[array_index].active = true;
+    pwm_states[array_index].start_time = millis();
+    pwm_states[array_index].duration = cmd.duration;
+    
+    // Update effective state (non-zero duty = ON for state tracking purposes, though it's PWM)
+    actuator_states[array_index] = (duty > 0) ? 1 : 0;
+
+    Serial.print("Actuator ");
+    Serial.print(cmd.actuator_id);
+    Serial.print(" PWM started: Freq=");
+    Serial.print(cmd.frequency);
+    Serial.print("Hz, Duty=");
+    Serial.print(cmd.duty_cycle * 100.0f);
+    Serial.print("%, Duration=");
+    Serial.print(cmd.duration);
+    Serial.println("ms");
+  }
+}
+
+void updatePWM() {
+  unsigned long current_time = millis();
+  for (int i = 0; i < NUM_ACTUATORS; i++) {
+    if (pwm_states[i].active) {
+      if (current_time - pwm_states[i].start_time >= pwm_states[i].duration) {
+        // PWM duration expired
+        int pin = getActuatorPin(i + 1); // 1-indexed ID
+        
+        // Stop PWM
+        ledcWrite(pwm_states[i].channel, 0);
+        ledcDetachPin(pin);
+        digitalWrite(pin, LOW); // Ensure explicit LOW
+        
+        pwm_states[i].active = false;
+        actuator_states[i] = 0; // Update state to OFF
+        
+        Serial.print("Actuator ");
+        Serial.print(i + 1);
+        Serial.println(" PWM finished");
+      }
     }
   }
 }

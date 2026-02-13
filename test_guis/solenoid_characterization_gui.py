@@ -66,6 +66,7 @@ class PacketType:
     ABORT = 7
     ABORT_DONE = 8
     CLEAR_ABORT = 9
+    PWM_ACTUATOR_COMMAND = 10
 
 
 DEFAULT_SENSOR_IP = '192.168.2.101'
@@ -79,6 +80,11 @@ ACTUATOR_COMMAND_PACKET_FORMAT = '<B'
 ACTUATOR_COMMAND_PACKET_SIZE = 1
 ACTUATOR_COMMAND_FORMAT = '<BB'
 ACTUATOR_COMMAND_SIZE = 2
+PWM_ACTUATOR_COMMAND_PACKET_FORMAT = '<B'
+PWM_ACTUATOR_COMMAND_PACKET_SIZE = 1
+# PWM Command: actuator_id (u8), duration_ms (u32), duty_cycle (float), frequency (float)
+PWM_ACTUATOR_COMMAND_FORMAT = '<BIff'
+PWM_ACTUATOR_COMMAND_SIZE = 13
 SENSOR_DATA_PACKET_FORMAT = '<BB'
 SENSOR_DATA_PACKET_SIZE = 2
 SENSOR_DATA_CHUNK_FORMAT = '<I'
@@ -672,6 +678,44 @@ def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
     return bytes(packet)
 
 
+def create_pwm_actuator_command_packet(commands: List[Tuple[int, int, float, float]]) -> bytes:
+    """
+    Creates a PWM Actuator Command packet.
+    Packet layout: PacketHeader + PWMActuatorCommandPacket + N PWMActuatorCommand.
+    
+    commands: List of tuples (actuator_id, duration_ms, duty_cycle, frequency)
+              Note: duration is in ms (uint32), duty_cycle is float (0.0-1.0), frequency is float (Hz)
+    """
+    if len(commands) == 0 or len(commands) > 255:
+        return b''
+        
+    header_size = PACKET_HEADER_SIZE
+    body_size = PWM_ACTUATOR_COMMAND_PACKET_SIZE
+    commands_size = len(commands) * PWM_ACTUATOR_COMMAND_SIZE
+    total_size = header_size + body_size + commands_size
+    
+    if total_size > MAX_PACKET_SIZE:
+        return b''
+        
+    packet = bytearray(total_size)
+    offset = 0
+    
+    # Header
+    struct.pack_into(PACKET_HEADER_FORMAT, packet, offset, PacketType.PWM_ACTUATOR_COMMAND, DIABLO_COMMS_VERSION, int(time.time() * 1000) & 0xFFFFFFFF)
+    offset += PACKET_HEADER_SIZE
+    
+    # Body (num_commands)
+    struct.pack_into(PWM_ACTUATOR_COMMAND_PACKET_FORMAT, packet, offset, len(commands))
+    offset += PWM_ACTUATOR_COMMAND_PACKET_SIZE
+    
+    # Commands
+    for actuator_id, duration_ms, duty_cycle, frequency in commands:
+        struct.pack_into(PWM_ACTUATOR_COMMAND_FORMAT, packet, offset, actuator_id, duration_ms, duty_cycle, frequency)
+        offset += PWM_ACTUATOR_COMMAND_SIZE
+        
+    return bytes(packet)
+
+
 # ---------------------- UDP Receiver ----------------------
 class UDPReceiver(QtCore.QThread):
     sensor_data_received = QtCore.pyqtSignal(dict, list, str)
@@ -1063,18 +1107,7 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         self.last_sync_params: Optional[Tuple[float, float]] = None
 
         self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-        # PWM state
-        self.pwm_timer = QtCore.QTimer(self)
-        self.pwm_timer.timeout.connect(self._pwm_tick)
-        self.pwm_start_time: Optional[float] = None
-        self.pwm_duration: float = 0.0
-        self.pwm_freq: float = 0.0
-        self.pwm_duty: float = 0.0
-        self.pwm_actuator_id: Optional[int] = None
-        self.pwm_actuator_type: Optional[str] = None
-        self.pwm_last_state: Optional[int] = None  # 0 = closed, 1 = open (hardware command)
-
+        
         self.init_ui()
 
         self.receiver.sensor_data_received.connect(self.on_sensor_data)
@@ -1222,7 +1255,7 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         btn_row.addWidget(self.pwm_duty_spin)
         btn_row.addWidget(QtWidgets.QLabel("Freq (Hz)"))
         self.pwm_freq_spin = QtWidgets.QDoubleSpinBox()
-        self.pwm_freq_spin.setRange(0.1, 1000)
+        self.pwm_freq_spin.setRange(0.1, 1000000.0)
         self.pwm_freq_spin.setValue(10)
         self.pwm_freq_spin.setDecimals(1)
         self.pwm_freq_spin.setMinimumHeight(32)
@@ -1525,50 +1558,38 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         if not aid:
             QtWidgets.QMessageBox.warning(self, "PWM", "Select an actuator first.")
             return
-        if self.pwm_timer.isActive():
-            return
+            
         duty = self.pwm_duty_spin.value() / 100.0
         freq = self.pwm_freq_spin.value()
-        duration = self.pwm_duration_spin.value()
-        if freq <= 0 or duration <= 0:
+        duration_s = self.pwm_duration_spin.value()
+        
+        if freq <= 0 or duration_s <= 0:
             QtWidgets.QMessageBox.warning(self, "PWM", "Frequency and duration must be positive.")
             return
-        self.pwm_actuator_id = aid
-        self.pwm_actuator_type = CONFIG.get_actuator_type_by_id(aid)
-        self.pwm_start_time = time.time()
-        self.pwm_duration = duration
-        self.pwm_freq = freq
-        self.pwm_duty = duty
-        self.pwm_last_state = None
-        self.pwm_go_btn.setEnabled(False)
-        self.pwm_timer.start(10)  # 10 ms tick
 
-    def _pwm_tick(self):
-        if self.pwm_start_time is None or self.pwm_actuator_id is None:
-            self.pwm_timer.stop()
-            self.pwm_go_btn.setEnabled(True)
-            return
-        elapsed = time.time() - self.pwm_start_time
-        if elapsed >= self.pwm_duration:
-            # End: stop PWM (no extra close command; leave solenoid in last state)
-            self.pwm_timer.stop()
-            self.pwm_go_btn.setEnabled(True)
-            self.pwm_start_time = None
-            self.pwm_actuator_id = None
-            return
-        period = 1.0 / self.pwm_freq
-        position_in_period = (elapsed % period) / period
-        should_be_open = position_in_period < self.pwm_duty
-        # Use same hardware mapping as OPEN/CLOSED buttons: NO open=0 closed=1, NC open=1 closed=0
-        if self.pwm_actuator_type == 'NO':
-            hardware_command = 0 if should_be_open else 1
-        else:
-            hardware_command = 1 if should_be_open else 0
-        if self.pwm_last_state != hardware_command:
-            self._send_actuator_command(self.pwm_actuator_id, hardware_command)
-            self.pwm_last_state = hardware_command
-            t_sec = self.get_current_board_time()
-            self._add_event_line(t_sec, "open" if should_be_open else "closed")
+        # Create and send PWM packet
+        duration_ms = int(duration_s * 1000)
+        # commands: List of tuples (actuator_id, duration_ms, duty_cycle, frequency)
+        commands = [(aid, duration_ms, duty, freq)]
+        
+        try:
+            packet = create_pwm_actuator_command_packet(commands)
+            if packet:
+                self.command_sock.sendto(packet, (self.device_ip, self.device_port))
+                self.status_label.setText(f"Sent PWM: ID={aid} {duration_s}s @ {freq}Hz {duty*100:.1f}%")
+                
+                # Add event lines for visualization
+                # "Open" line at start
+                t_start = self.get_current_board_time()
+                self._add_event_line(t_start, "open")
+                
+                # "Closed" line at end (estimated)
+                t_end = t_start + duration_s
+                self._add_event_line(t_end, "closed")
+                
+        except OSError as e:
+            self.status_label.setText(f"Error sending PWM: {e}")
+            print(f"Error sending PWM command: {e}")
 
     def on_pause_clicked(self):
         self.paused = self.pause_btn.isChecked()
@@ -1641,12 +1662,6 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
 
 
     def closeEvent(self, event):
-        if self.pwm_timer.isActive():
-            self.pwm_timer.stop()
-            if self.pwm_actuator_id is not None:
-                actuator_type = self.pwm_actuator_type or 'NC'
-                hw = 1 if actuator_type == 'NO' else 0
-                self._send_actuator_command(self.pwm_actuator_id, hw)
         if self.command_sock:
             try:
                 self.command_sock.close()
