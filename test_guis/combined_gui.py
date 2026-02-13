@@ -108,7 +108,7 @@ DEFAULT_ACTUATOR_ABBREV_TO_ROLE = {
     "OM": "LOX Main",
 }
 # When "only show actuators with roles" is true: display order in grid (row1 vents, row2 press, row3 mains; col1 fuel, col2 lox)
-ACTUATOR_DISPLAY_ORDER_WHEN_ROLES = ["Fuel Vent", "LOX Vent", "Fuel Press", "LOX Press", "Fuel Main", "LOX Main"]
+ACTUATOR_DISPLAY_ORDER_WHEN_ROLES = ["Fuel Vent", "LOX Vent", "Fuel Press", "LOX Press", "Fuel Main", "LOX Main", "Fuel Fill"]
 ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
 SENSOR_LABELS_FILE = Path(__file__).parent / "sensor_labels.json"
 
@@ -178,7 +178,8 @@ class ConfigManager:
                 "pt_calibration_csv": [],  # List of CSV paths (empty = use default)
                 "state_machine_csv": "",
                 "state_transitions_csv": "",
-            }
+            },
+            "simulate_chamber_pressure": False
         }
         self.load()
 
@@ -2841,6 +2842,11 @@ class SettingsWidget(QtWidgets.QWidget):
         self.demo_chk = QtWidgets.QCheckBox("Demo Mode")
         self.demo_chk.toggled.connect(self.sensor_widget.on_demo_mode_toggled)
         sensor_layout.addRow(self.demo_chk)
+
+        self.sim_pressure_chk = QtWidgets.QCheckBox("Simulate Chamber Pressure")
+        self.sim_pressure_chk.setToolTip("If enabled: In FIRE state, transitions to ARMED if LOX or Fuel Upstream < 350 psi")
+        self.sim_pressure_chk.toggled.connect(self.on_sim_pressure_toggled)
+        sensor_layout.addRow(self.sim_pressure_chk)
         
         self.time_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.time_slider.setRange(1, 60)
@@ -3120,6 +3126,9 @@ class SettingsWidget(QtWidgets.QWidget):
         # Sensor
         with QtCore.QSignalBlocker(self.demo_chk):
             self.demo_chk.setChecked(self.sensor_widget.demo_mode)
+
+        with QtCore.QSignalBlocker(self.sim_pressure_chk):
+            self.sim_pressure_chk.setChecked(CONFIG.config.get("simulate_chamber_pressure", False))
         
         with QtCore.QSignalBlocker(self.time_slider):
             self.time_slider.setValue(int(self.sensor_widget.window_seconds))
@@ -3295,6 +3304,27 @@ class SettingsWidget(QtWidgets.QWidget):
         if fluid is not None:
             CONFIG.config.setdefault("pressure_limits", {}).setdefault(fluid, {})[limit] = value
             CONFIG.save()
+
+    def on_sim_pressure_toggled(self, checked):
+        CONFIG.config["simulate_chamber_pressure"] = checked
+        CONFIG.save()
+        # Direct update to main window state (via parent linkage or signal)
+        if hasattr(self.parent(), "parent") and hasattr(self.parent().parent(), "update_sim_pressure_state"):
+             # stack -> central_widget -> CombinedMainWindow
+             # But self.parent() is the QStackedWidget. self.parent().parent() is usually central widget or window.
+             # Easier: SettingsWidget constructed with main_window ref? No.
+             # We can use the fact that CombinedMainWindow holds a ref to settings_widget.
+             # Better pattern: SettingsWidget emits signal, connected in MainWindow.
+             pass
+        # Actually, let's just use CONFIG in main window loop or add a specific update method call if we can resolve main window.
+        # CombinedMainWindow passes 'self' to settings widget constructor?
+        # __init__(self, sensor_widget, actuator_widget, parent=None) -> parent is stack.
+        # Let's rely on config being source of truth for the loop check, or add a callback.
+        # For immediate update, we can assume the loop checks CONFIG or a member variable updated by timer/loop.
+        # The loop _check_auto_state_transitions runs on timer, so reading CONFIG.config there is fine/safe enough
+        # or we update a variable in CombinedMainWindow if we really want to.
+        # Let's update the Config object which is shared.
+        pass
 
     def on_time_changed(self, val):
         self.time_lbl.setText(f"{val}s")
@@ -3602,6 +3632,36 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         gn2_thresh = float(pl.get("GN2", {}).get("THRESH", 10.0))
         fuel_thresh = float(pl.get("ETH", {}).get("THRESH", 10.0))
         ox_thresh = float(pl.get("LOX", {}).get("THRESH", 10.0))
+        
+        # Simulate Chamber Pressure Logic (Safety/Test)
+        # If enabled: In FIRE state, if LOX < 350 or Fuel < 350, go to ARMED
+        if current == "Fire" and CONFIG.config.get("simulate_chamber_pressure", False):
+            # Using Upstream sensors (from config mapping or hardcoded roles?)
+            # User said "LOX upstream OR Fuel Upstream". 
+            # We need to get pressure from the sensors assigned to these roles.
+            # config.json: "sensor_roles": { "Fuel Upstream": 1, "Data": ..., "Ox Upstream": 5 }
+            # Let's resolve the PT IDs for these roles.
+            fuel_upstream_pt = CONFIG.get_sensor_role("Fuel Upstream")
+            ox_upstream_pt = CONFIG.get_sensor_role("Ox Upstream") # "Ox Upstream" in config vs "LOX Upstream" in code?
+            # Looking at config.json provided earlier: 
+            # "Fuel Upstream": 1, "Ox Upstream": 5.
+            
+            # Helper to get PSI
+            def get_psi(pt_id):
+                if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_data:
+                    d = self.sensor_widget.sensor_psi_data[pt_id]
+                    if d: return d[-1][1]
+                return 0.0
+            
+            p_fuel = get_psi(fuel_upstream_pt)
+            p_lox = get_psi(ox_upstream_pt)
+            
+            # Threshold is 350 psi
+            if p_fuel < 350.0 or p_lox < 350.0:
+                self.top_bar_widget.request_state("Armed")
+                self.log_event("Auto Transition", f"Simulate Chamber Pressure triggered: Fuel={p_fuel:.1f}, LOX={p_lox:.1f} (<350)")
+                return
+
         # Press → Vent when pressure above POP
         if current == "GN2 Press" and gn2_psi >= gn2_pop:
             self.top_bar_widget.request_state("GN2 Vent")

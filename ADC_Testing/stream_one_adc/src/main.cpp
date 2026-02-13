@@ -130,54 +130,13 @@ void read_data(int count) {
   }
 }
 
-// Build sensor data packet in DAQv2-Comms format (same layout as DiabloPacketUtils).
-// Implemented here so we don't depend on the library's create_sensor_data_packet (linker mismatch).
-static size_t build_sensor_data_packet(
-    const std::vector<Diablo::SensorDataChunkCollection> &chunks,
-    uint8_t num_sensors,
-    uint8_t *buffer,
-    size_t buffer_size) {
-  const size_t header_size = sizeof(Diablo::PacketHeader);
-  const size_t body_header_size = sizeof(Diablo::SensorDataPacket);
-  const size_t num_chunks = chunks.size();
-  const size_t per_chunk_size =
-      sizeof(Diablo::SensorDataChunk) + (static_cast<size_t>(num_sensors) * sizeof(Diablo::SensorDatapoint));
-  const size_t total_size = header_size + body_header_size + (num_chunks * per_chunk_size);
 
-  if (buffer_size < total_size) return 0;
-
-  Diablo::PacketHeader header;
-  header.packet_type = Diablo::PacketType::SENSOR_DATA;
-  header.version = DIABLO_COMMS_VERSION;
-  header.timestamp = millis();
-
-  uint8_t *ptr = buffer;
-  memcpy(ptr, &header, header_size);
-  ptr += header_size;
-
-  Diablo::SensorDataPacket body;
-  body.num_chunks = static_cast<uint8_t>(num_chunks);
-  body.num_sensors = num_sensors;
-  memcpy(ptr, &body, body_header_size);
-  ptr += body_header_size;
-
-  for (size_t i = 0; i < num_chunks; ++i) {
-    Diablo::SensorDataChunk chunk_hdr;
-    chunk_hdr.timestamp = chunks[i].timestamp;
-    memcpy(ptr, &chunk_hdr, sizeof(Diablo::SensorDataChunk));
-    ptr += sizeof(Diablo::SensorDataChunk);
-    const size_t dp_size = static_cast<size_t>(num_sensors) * sizeof(Diablo::SensorDatapoint);
-    memcpy(ptr, chunks[i].datapoints.data(), dp_size);
-    ptr += dp_size;
-  }
-  return total_size;
-}
 
 void sendSensorDataPacket() {
   if (dataChunks.empty()) return;
 
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t packetSize = build_sensor_data_packet(
+  size_t packetSize = Diablo::create_sensor_data_packet(
     dataChunks,
     NUM_SENSORS,
     packetBuffer,

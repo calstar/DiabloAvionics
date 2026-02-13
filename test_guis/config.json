@@ -5,11 +5,12 @@
         "Fuel Press",
         "LOX Press",
         "LOX Vent",
-        "Fuel Main"
+        "Fuel Main",
+        "Fuel Fill"
     ],
     "actuator_roles": {
         "LOX Main": [
-            "NO",
+            "NC",
             1
         ],
         "Fuel Main": [
@@ -21,7 +22,7 @@
             2
         ],
         "Fuel Press": [
-            "NO",
+            "NC",
             3
         ],
         "LOX Vent": [
@@ -29,8 +30,12 @@
             6
         ],
         "LOX Press": [
+            "NO",
+            9
+        ],
+        "Fuel Fill": [
             "NC",
-            4
+            10
         ]
     },
     "sensor_roles": {
@@ -48,7 +53,8 @@
         "FP": "Fuel Press",
         "OP": "LOX Press",
         "FM": "Fuel Main",
-        "OM": "LOX Main"
+        "OM": "LOX Main",
+        "FF": "Fuel Fill"
     },
     "network": {
         "actuator_ip": "192.168.2.201",
@@ -63,7 +69,7 @@
         "y_axis_min": 0.0,
         "y_axis_max": 700.0,
         "y_axis_autoscale": true,
-        "only_show_actuators_with_roles": false,
+        "only_show_actuators_with_roles": true,
         "only_show_pt_with_roles": true,
         "graph_ma_samples": 1,
         "display_ma_samples": 1
@@ -102,5 +108,6 @@
         ],
         "state_machine_csv": "state_machine_actuators.csv",
         "state_transitions_csv": "state_transitions.csv"
-    }
+    },
+    "simulate_chamber_pressure": false
 }
