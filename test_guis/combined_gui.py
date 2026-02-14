@@ -64,6 +64,7 @@ class PacketType:
     ABORT = 7
     ABORT_DONE = 8
     CLEAR_ABORT = 9
+    PWM_ACTUATOR_COMMAND = 10
 
 # Default configuration
 DEFAULT_SENSOR_IP = '192.168.2.101'  # Sensor board IP address
@@ -80,6 +81,12 @@ ACTUATOR_COMMAND_PACKET_SIZE = 1
 
 ACTUATOR_COMMAND_FORMAT = '<BB'  # 2 bytes
 ACTUATOR_COMMAND_SIZE = 2
+
+PWM_ACTUATOR_COMMAND_PACKET_FORMAT = '<B'
+PWM_ACTUATOR_COMMAND_PACKET_SIZE = 1
+# PWM Command: actuator_id (u8), duration_ms (u32), duty_cycle (float), frequency (float)
+PWM_ACTUATOR_COMMAND_FORMAT = '<BIff'
+PWM_ACTUATOR_COMMAND_SIZE = 13
 
 SENSOR_DATA_PACKET_FORMAT = '<BB'  # 2 bytes
 SENSOR_DATA_PACKET_SIZE = 2
@@ -205,6 +212,10 @@ class ConfigManager:
         if not names:
             names = list(roles.keys()) if roles else list(DEFAULT_ACTUATOR_ROLE_NAMES)
             self.config["actuator_role_names"] = names
+        # Ensure any role in actuator_roles is also in actuator_role_names
+        for name in roles:
+            if name not in names:
+                names.append(name)
         for name in names:
             if name not in roles:
                 roles[name] = 0
@@ -762,6 +773,44 @@ def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
         struct.pack_into(ACTUATOR_COMMAND_FORMAT, packet, offset, actuator_id, actuator_state)
         offset += ACTUATOR_COMMAND_SIZE
     
+    return bytes(packet)
+
+
+def create_pwm_actuator_command_packet(commands: List[Tuple[int, int, float, float]]) -> bytes:
+    """
+    Creates a PWM Actuator Command packet.
+    Packet layout: PacketHeader + PWMActuatorCommandPacket + N PWMActuatorCommand.
+    
+    commands: List of tuples (actuator_id, duration_ms, duty_cycle, frequency)
+              Note: duration is in ms (uint32), duty_cycle is float (0.0-1.0), frequency is float (Hz)
+    """
+    if len(commands) == 0 or len(commands) > 255:
+        return b''
+        
+    header_size = PACKET_HEADER_SIZE
+    body_size = PWM_ACTUATOR_COMMAND_PACKET_SIZE
+    commands_size = len(commands) * PWM_ACTUATOR_COMMAND_SIZE
+    total_size = header_size + body_size + commands_size
+    
+    if total_size > MAX_PACKET_SIZE:
+        return b''
+        
+    packet = bytearray(total_size)
+    offset = 0
+    
+    # Header
+    struct.pack_into(PACKET_HEADER_FORMAT, packet, offset, PacketType.PWM_ACTUATOR_COMMAND, DIABLO_COMMS_VERSION, int(time.time() * 1000) & 0xFFFFFFFF)
+    offset += PACKET_HEADER_SIZE
+    
+    # Body (num_commands)
+    struct.pack_into(PWM_ACTUATOR_COMMAND_PACKET_FORMAT, packet, offset, len(commands))
+    offset += PWM_ACTUATOR_COMMAND_PACKET_SIZE
+    
+    # Commands
+    for actuator_id, duration_ms, duty_cycle, frequency in commands:
+        struct.pack_into(PWM_ACTUATOR_COMMAND_FORMAT, packet, offset, actuator_id, duration_ms, duty_cycle, frequency)
+        offset += PWM_ACTUATOR_COMMAND_SIZE
+        
     return bytes(packet)
 
 
@@ -1340,6 +1389,15 @@ class SensorPlotWidget(QtWidgets.QWidget):
         voltage = (code_int32 * self.reference_voltage) / max_code
         return voltage
     
+    def on_navigation_requested(self, target: str):
+        """Handle navigation requests from TopBarWidget"""
+        if target == "settings":
+            self.open_settings()
+        elif target == "dashboard":
+            self.open_dashboard()
+        elif target == "pwm":
+            self.open_pwm_control()
+
     def on_status_update(self, message: str):
         """Handle status updates from receiver thread"""
         if not self.demo_mode:
@@ -1724,6 +1782,9 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         # Reference to main window for event tracking (set by main window)
         self.main_window_ref = None
         
+        # PWM control window instance (lazily created)
+        self.pwm_window = None
+        
         # Manual control lock: True = manual control enabled (DEBUG button), False = locked
         self.manual_control_enabled = False  # Default to False (locked) on startup
         
@@ -1777,54 +1838,54 @@ class ActuatorControlWidget(QtWidgets.QWidget):
             actuator_frame = QtWidgets.QFrame()
             actuator_frame.setFrameShape(QtWidgets.QFrame.Shape.Box)
             actuator_frame.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-            actuator_frame.setStyleSheet("padding: 5px 8px 8px 8px; margin: 3px; background-color: #353535;")
+            actuator_frame.setStyleSheet("padding: 2px 4px 4px 4px; margin: 1px; background-color: #353535;")
             
             actuator_layout = QtWidgets.QVBoxLayout(actuator_frame)
             actuator_layout.setContentsMargins(0, 0, 0, 0)
-            actuator_layout.setSpacing(2)
+            actuator_layout.setSpacing(1)
             
             # Actuator ID label
             # If label exists, show label. Else show "Actuator {id}"
             label_text = self.actuator_labels.get(actuator_id, "") or f"Actuator {actuator_id}"
             id_label = QtWidgets.QLabel(label_text)
             id_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            id_label.setMinimumHeight(25)
-            id_label.setStyleSheet("font-weight: bold; font-size: 12pt; padding: 2px 5px; color: white; background-color: transparent;")
+            id_label.setMinimumHeight(20)
+            id_label.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 1px 2px; color: white; background-color: transparent;")
             actuator_layout.addWidget(id_label)
             
             # Button container
             button_container = QtWidgets.QHBoxLayout()
-            button_container.setSpacing(5)
+            button_container.setSpacing(3)
             
-            # OPEN button (2px border so layout matches selected state and text doesn't shift)
+            # OPEN button
             on_btn = QtWidgets.QPushButton("OPEN")
-            on_btn.setMinimumHeight(35)
+            on_btn.setMinimumHeight(30)
             bg_color = self.palette().color(QtGui.QPalette.ColorRole.Window).name()
             on_btn.setStyleSheet(f"""
                 QPushButton {{
-                    font-size: 11pt;
+                    font-size: 10pt;
                     font-weight: bold;
                     background-color: {bg_color};
                     color: #FFFFFF;
                     border: 2px solid {bg_color};
-                    border-radius: 5px;
-                    padding: 5px;
+                    border-radius: 4px;
+                    padding: 2px;
                 }}
             """)
             on_btn.clicked.connect(lambda checked=False, aid=actuator_id: self.set_actuator_state(aid, 1))
             
-            # CLOSED button (2px border so layout matches selected state and text doesn't shift)
+            # CLOSED button
             off_btn = QtWidgets.QPushButton("CLOSED")
-            off_btn.setMinimumHeight(40)
+            off_btn.setMinimumHeight(30)
             off_btn.setStyleSheet(f"""
                 QPushButton {{
-                    font-size: 11pt;
+                    font-size: 10pt;
                     font-weight: bold;
                     background-color: {bg_color};
                     color: #FFFFFF;
                     border: 2px solid {bg_color};
-                    border-radius: 5px;
-                    padding: 5px;
+                    border-radius: 4px;
+                    padding: 2px;
                 }}
             """)
             off_btn.clicked.connect(lambda checked=False, aid=actuator_id: self.set_actuator_state(aid, 0))
@@ -1837,8 +1898,8 @@ class ActuatorControlWidget(QtWidgets.QWidget):
             voltage_label = QtWidgets.QLabel("0.000 V")
             voltage_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             voltage_label.setWordWrap(True)
-            voltage_label.setMinimumHeight(15)
-            voltage_label.setStyleSheet("font-size: 7pt; padding: 1px 3px; color: white; background-color: transparent;")
+            voltage_label.setMinimumHeight(12)
+            voltage_label.setStyleSheet("font-size: 7pt; padding: 0px 2px; color: white; background-color: transparent;")
             actuator_layout.addWidget(voltage_label)
             
             # Add to grid
@@ -1855,6 +1916,32 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         
         layout.addWidget(self.grid_container, 1)
         
+        # PWM Control Button
+        self.pwm_btn = QtWidgets.QPushButton("PWM CONTROL")
+        self.pwm_btn.setMinimumHeight(40)
+        self.pwm_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 10pt;
+                font-weight: bold;
+                background-color: #505050;
+                color: #ffffff;
+                border: 2px solid #404040;
+                border-radius: 4px;
+                padding: 4px 8px;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #606060;
+                border-color: #505050;
+            }
+            QPushButton:pressed {
+                background-color: #404040;
+                border-color: #303030;
+            }
+        """)
+        self.pwm_btn.clicked.connect(self.open_pwm_control)
+        layout.addWidget(self.pwm_btn)
+
         # Initialize actuators based on NC/NO type
         # NO actuators start OPEN (GUI state 1, hardware command 0)
         # NC actuators start CLOSED (GUI state 0, hardware command 0)
@@ -1875,6 +1962,20 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         
         # Apply initial visibility based on setting
         self.update_actuator_visibility()
+
+    def open_pwm_control(self):
+        """Open the PWM control window, creating it lazily."""
+        # Use main window's PWM window if available, otherwise create our own
+        if self.main_window_ref and hasattr(self.main_window_ref, 'open_pwm_control'):
+            self.main_window_ref.open_pwm_control()
+            return
+
+        # Fallback: create/show our own PWM window
+        if self.pwm_window is None:
+            self.pwm_window = PWMControlWindow(self.main_window_ref or self)
+        self.pwm_window.show()
+        self.pwm_window.raise_()
+        self.pwm_window.activateWindow()
 
     def update_label_display(self, actuator_id, text):
         """External method to update label display when changed in settings"""
@@ -1900,9 +2001,9 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                 widget = self.actuator_widgets[i]
                 self.grid_layout.removeWidget(widget['frame'])
             
-            # Collect visible actuators in display order: vents (fuel, lox), press (fuel, lox), mains (fuel, lox)
+            # Collect visible actuators from all assigned roles in config
             visible_widgets = []
-            for role_name in ACTUATOR_DISPLAY_ORDER_WHEN_ROLES:
+            for role_name in CONFIG.get_actuator_role_names():
                 actuator_id = CONFIG.get_actuator_role(role_name)
                 if actuator_id and actuator_id > 0:
                     array_idx = actuator_id - 1
@@ -1965,36 +2066,36 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         # Same 2px border as active state so text doesn't shift when toggling
         inactive_style = f"""
             QPushButton {{
-                font-size: 11pt;
+                font-size: 10pt;
                 font-weight: bold;
                 background-color: {bg_color};
                 color: #FFFFFF;
                 border: 2px solid {bg_color};
-                border-radius: 5px;
-                padding: 5px;
+                border-radius: 4px;
+                padding: 2px;
             }}
         """
         # Saturated green box for selected OPEN, saturated red box for selected CLOSED (only when selected)
         active_open_style = """
             QPushButton {
-                font-size: 11pt;
+                font-size: 10pt;
                 font-weight: bold;
                 background-color: #008800;
                 color: #ffffff;
                 border: 2px solid #008800;
-                border-radius: 5px;
-                padding: 5px;
+                border-radius: 4px;
+                padding: 2px;
             }
         """
         active_closed_style = """
             QPushButton {
-                font-size: 11pt;
+                font-size: 10pt;
                 font-weight: bold;
                 background-color: #dc143c;
                 color: #ffffff;
                 border: 2px solid #dc143c;
-                border-radius: 5px;
-                padding: 5px;
+                border-radius: 4px;
+                padding: 2px;
             }
         """
         if actuator_state == 1:
@@ -2088,7 +2189,186 @@ class ActuatorControlWidget(QtWidgets.QWidget):
 
 
 
-# ---------------------- Top Bar Widgets ----------------------
+# ---------------------- PWM Control Window ----------------------
+class PWMControlWindow(QtWidgets.QWidget):
+    """
+    Dedicated window for detailed actuator control (PWM).
+    Allows setting frequency, duty cycle, duration, and arming commands for the next state transition.
+    """
+    def __init__(self, parent_window):
+        super().__init__()
+        self.setWindowTitle("Actuator PWM Control")
+        self.resize(900, 700)
+        self.parent_window = parent_window  # Reference to CombinedMainWindow
+        
+        # Track armed commands: actuator_id -> (duration_ms, duty, freq)
+        self.active_arms = {} 
+        
+        self.init_ui()
+        
+    def init_ui(self):
+        main_layout = QtWidgets.QVBoxLayout(self)
+        
+        # Header
+        header = QtWidgets.QLabel("Actuator PWM Configuration")
+        header.setStyleSheet("font-size: 16pt; font-weight: bold; margin-bottom: 10px;")
+        main_layout.addWidget(header)
+        
+        # Scroll area for actuator list
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QtWidgets.QWidget()
+        self.scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
+        
+        self.actuator_rows = {}  # id -> widgets dict
+        
+        # Create a row for each actuator
+        for i in range(NUM_ACTUATORS):
+            actuator_id = i + 1
+            row_widget = QtWidgets.QGroupBox(f"Actuator {actuator_id}")
+            row_layout = QtWidgets.QHBoxLayout(row_widget)
+            
+            # Label (Role)
+            role = CONFIG.get_actuator_label(actuator_id)
+            label = QtWidgets.QLabel(f"{role}" if role else "Unassigned")
+            label.setMinimumWidth(120)
+            label.setStyleSheet("font-weight: bold;")
+            row_layout.addWidget(label)
+            
+            # Parameters
+            # Duty Cycle
+            row_layout.addWidget(QtWidgets.QLabel("Duty %:"))
+            duty_spin = QtWidgets.QDoubleSpinBox()
+            duty_spin.setRange(0, 100)
+            duty_spin.setValue(50.0)
+            duty_spin.setSuffix("%")
+            row_layout.addWidget(duty_spin)
+            
+            # Rate/Freq
+            row_layout.addWidget(QtWidgets.QLabel("Freq (Hz):"))
+            freq_spin = QtWidgets.QDoubleSpinBox()
+            freq_spin.setRange(0.1, 1000000.0) # Match extended range from previous task
+            freq_spin.setValue(10.0)
+            freq_spin.setDecimals(1)
+            row_layout.addWidget(freq_spin)
+            
+            # Duration
+            row_layout.addWidget(QtWidgets.QLabel("Dur (s):"))
+            dur_spin = QtWidgets.QDoubleSpinBox()
+            dur_spin.setRange(0.0, 3600.0)
+            dur_spin.setValue(1.0)
+            dur_spin.setDecimals(2)
+            row_layout.addWidget(dur_spin)
+            
+            # Actions
+            btn_exec = QtWidgets.QPushButton("Execute Now")
+            btn_exec.setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold;")
+            btn_exec.clicked.connect(lambda checked=False, aid=actuator_id: self.execute_now(aid))
+            row_layout.addWidget(btn_exec)
+            
+            # Arm Checkbox
+            chk_arm = QtWidgets.QCheckBox("Arm for Next State")
+            chk_arm.setStyleSheet("margin-left: 10px;")
+            chk_arm.toggled.connect(lambda checked, aid=actuator_id: self.update_arm_status(aid, checked))
+            row_layout.addWidget(chk_arm)
+            
+            self.scroll_layout.addWidget(row_widget)
+            
+            self.actuator_rows[actuator_id] = {
+                'duty': duty_spin,
+                'freq': freq_spin,
+                'dur': dur_spin,
+                'arm_chk': chk_arm
+            }
+            
+        self.scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+        
+        # Global Controls
+        bottom_bar = QtWidgets.QHBoxLayout()
+        
+        self.lbl_status = QtWidgets.QLabel("Ready")
+        bottom_bar.addWidget(self.lbl_status)
+        
+        bottom_bar.addStretch()
+        
+        btn_disarm_all = QtWidgets.QPushButton("Disarm All")
+        btn_disarm_all.setStyleSheet("background-color: #e74c3c; color: white; padding: 5px 15px;")
+        btn_disarm_all.clicked.connect(self.disarm_all)
+        bottom_bar.addWidget(btn_disarm_all)
+        
+        btn_close = QtWidgets.QPushButton("Close")
+        btn_close.clicked.connect(self.hide)
+        bottom_bar.addWidget(btn_close)
+        
+        main_layout.addLayout(bottom_bar)
+
+    def execute_now(self, actuator_id):
+        """Send PWM command immediately."""
+        widgets = self.actuator_rows[actuator_id]
+        duty = widgets['duty'].value() / 100.0
+        freq = widgets['freq'].value()
+        dur_s = widgets['dur'].value()
+        dur_ms = int(dur_s * 1000)
+        
+        # Commands: list of (id, dur_ms, duty, freq)
+        commands = [(actuator_id, dur_ms, duty, freq)]
+        packet = create_pwm_actuator_command_packet(commands)
+        
+        if self.parent_window and self.parent_window.actuator_widget:
+            try:
+                sock = self.parent_window.actuator_widget.command_sock
+                if sock:
+                    ip = self.parent_window.actuator_widget.device_ip
+                    port = self.parent_window.actuator_widget.device_port
+                    sock.sendto(packet, (ip, port))
+                    self.lbl_status.setText(f"Executed PWM on Actuator {actuator_id}")
+                    print(f"Manual PWM: ID={actuator_id} F={freq}Hz D={duty*100}% T={dur_s}s")
+            except Exception as e:
+                self.lbl_status.setText(f"Error: {e}")
+                
+    def update_arm_status(self, actuator_id, checked):
+        """Update the armed status dict based on checkbox."""
+        if checked:
+            widgets = self.actuator_rows[actuator_id]
+            duty = widgets['duty'].value() / 100.0
+            freq = widgets['freq'].value()
+            dur_s = widgets['dur'].value()
+            dur_ms = int(dur_s * 1000)
+            
+            self.active_arms[actuator_id] = (dur_ms, duty, freq)
+            self.lbl_status.setText(f"Armed Actuator {actuator_id} for next state")
+        else:
+            if actuator_id in self.active_arms:
+                del self.active_arms[actuator_id]
+                self.lbl_status.setText(f"Disarmed Actuator {actuator_id}")
+                
+    def disarm_all(self):
+        """Uncheck all arm checkboxes."""
+        for aid, widgets in self.actuator_rows.items():
+            widgets['arm_chk'].setChecked(False) # This triggers update_arm_status via signal
+        self.active_arms.clear()
+        self.lbl_status.setText("All actuators disarmed")
+
+    def get_armed_commands(self) -> List[Tuple[int, int, float, float]]:
+        """Return list of armed commands to be sent on state transition.
+        Also clears the arms (consumes them) if that's the desired behavior. 
+        Re-reading user requirement: 'wait till the next state begins'. 
+        Usually one-shot. Let's consume them (uncheck boxes) after retrieving."""
+        commands = []
+        for aid, (dur, duty, freq) in self.active_arms.items():
+            commands.append((aid, dur, duty, freq))
+        return commands
+        
+    def consume_arms(self):
+        """Clear all arms after execution (update UI)."""
+        # Block signals to prevent recursion loops or unnecessary updates if we want to keep them checks?
+        # Usually 'arm for next state' implies one-shot. Let's uncheck them.
+        for aid in list(self.active_arms.keys()):
+            # We used list(keys) because toggling checkbox modifies the dict
+            self.actuator_rows[aid]['arm_chk'].setChecked(False) 
+
 class PressureBarWidget(QtWidgets.QWidget):
     """
     Vertical bar gauge: four dashed lines at 20%, 40%, 60%, 80% of bar height (global Y from parent).
@@ -2499,11 +2779,16 @@ class TopBarWidget(QtWidgets.QWidget):
             }
             QPushButton:pressed {
                 background-color: #404040;
-                border-color: #353535;
+                border-color: #303030;
             }
         """)
-        self.nav_btn.clicked.connect(self.toggle_view)
-        btn_layout.addWidget(self.nav_btn)
+        self.nav_btn.clicked.connect(lambda: self.navigation_requested.emit("settings"))
+        
+        # Add buttons to layout
+        bottom_row = QtWidgets.QHBoxLayout()
+        bottom_row.addWidget(self.nav_btn)
+        
+        btn_layout.addLayout(bottom_row)
         
         # DEBUG — toggle; unchecked = neutral, checked = solid green (no gradients)
         self.debug_btn = QtWidgets.QPushButton("DEBUG")
@@ -2708,20 +2993,26 @@ class TopBarWidget(QtWidgets.QWidget):
             self.mode_buttons[idx].setChecked(True)
             # Emit signal with mode name (keep in sync with mode_labels above)
             mode_labels = ["Idle", "Armed", "Fuel Fill", "Ox Fill", "Quick Fire", "GN2 Press", "Fuel Press", "Fuel Vent", "Ox Press", "Ox Vent", "High Press", "GN2 Vent", "Fire", "Vent"]
-            if 0 <= idx < len(mode_labels):
-                new_state = mode_labels[idx]
-                self.current_state = new_state
-                self._update_current_state_display()
-                # Update button states for new current state
-                self.update_button_states(new_state)
-                self.mode_changed.emit(new_state)
-                # Quick Fire: start 3s timer to auto-transition to GN2 Press; otherwise cancel timer
-                if new_state == "Quick Fire":
-                    self.quick_fire_to_gn2_timer.stop()
-                    self.quick_fire_to_gn2_timer.start(3000)
-                else:
-                    self.quick_fire_to_gn2_timer.stop()
-                self.abort_vent_to_abort_timer.stop()
+            new_state = mode_labels[idx]
+
+            # Stop any active timers if state is changing
+            if self.current_state == "Quick Fire":
+                self.quick_fire_to_gn2_timer.stop()
+            elif self.current_state == "Abort" and new_state == "Vent":
+                # Starting release sequence from abort
+                self.abort_vent_to_abort_timer.start(5000)
+
+            self.current_state = new_state
+            self._update_current_state_display()
+            self.update_button_states(new_state)
+            self.mode_changed.emit(new_state)
+            
+            # Quick Fire: start 3s timer to auto-transition to GN2 Press; otherwise cancel timer
+            if new_state == "Quick Fire":
+                self.quick_fire_to_gn2_timer.start(3000)
+            else:
+                self.quick_fire_to_gn2_timer.stop()
+            self.abort_vent_to_abort_timer.stop()
         
         # Button styles are now handled by update_button_states, which is called above
 
@@ -3530,6 +3821,9 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         self.update_timer.start(100)
 
         self._apply_bar_limits()
+        
+        # PWM control window (lazily created)
+        self.pwm_window = None
     
     def _apply_bar_limits(self):
         """Apply NOP, MEOP, POP, THRESH and shared scale_max to top bar gauges (bottom=0, same scale)."""
@@ -3561,6 +3855,14 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         else:
             print(f"Warning: actuator_widget not available when DEBUG toggled")
     
+    def open_pwm_control(self):
+        """Open the PWM control window, creating it lazily."""
+        if self.pwm_window is None:
+            self.pwm_window = PWMControlWindow(self)
+        self.pwm_window.show()
+        self.pwm_window.raise_()
+        self.pwm_window.activateWindow()
+
     def on_mode_changed(self, mode_name: str):
         """Handle mode button change - apply state from CSV and log event"""
         relative_time = time.time() - self.sensor_widget.stats_start_time
@@ -3577,6 +3879,22 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
             apply_state_from_csv(self.actuator_widget, csv_state_name, self.state_machine)
         else:
             print(f"Warning: State machine not loaded, cannot apply state for '{mode_name}'")
+        
+        # Fire any armed PWM commands on state transition
+        if self.pwm_window is not None:
+            armed = self.pwm_window.get_armed_commands()
+            if armed:
+                packet = create_pwm_actuator_command_packet(armed)
+                try:
+                    sock = self.actuator_widget.command_sock
+                    ip = self.actuator_widget.device_ip
+                    port = self.actuator_widget.device_port
+                    sock.sendto(packet, (ip, port))
+                    self.log_event("PWM Armed Execute", f"{len(armed)} commands on '{mode_name}'")
+                    print(f"Sent {len(armed)} armed PWM commands on state '{mode_name}'")
+                except Exception as e:
+                    print(f"Error sending armed PWM commands: {e}")
+                self.pwm_window.consume_arms()
     
     def log_event(self, event_type: str, details: str):
         """Log an event with current relative time"""

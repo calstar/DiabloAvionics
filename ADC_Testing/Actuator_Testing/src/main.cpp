@@ -16,7 +16,7 @@ const unsigned long ADC_READ_INTERVAL_MS = 1000;  // Read ADC every 100ms (adjus
 byte mac[6];  // Will be populated with unique MAC from ESP32 eFuse
 IPAddress staticIP(192, 168, 2, 201);
 IPAddress gateway(0, 0, 0, 0);
-IPAddress subnet(255, 255, 255, 0);
+IPAddress subnet(255, 255, 255, 0);f
 IPAddress dns(192, 168, 2, 1);
 const int udpPort = 5005;  // Port to listen for actuator commands
 IPAddress receiverIP(192, 168, 2, 20);  // IP address to send sensor data to

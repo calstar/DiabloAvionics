@@ -6,15 +6,17 @@
         "LOX Press",
         "LOX Vent",
         "Fuel Main",
-        "Fuel Fill"
+        "GSE Low Vent",
+        "Fuel Fill Press",
+        "Fuel Fill Vent"
     ],
     "actuator_roles": {
         "LOX Main": [
-            "NC",
+            "NO",
             1
         ],
         "Fuel Main": [
-            "NC",
+            "NO",
             7
         ],
         "Fuel Vent": [
@@ -33,7 +35,15 @@
             "NO",
             9
         ],
-        "Fuel Fill": [
+        "GSE Low Vent": [
+            "NC",
+            5
+        ],
+        "Fuel Fill Vent": [
+            "NC",
+            8
+        ],
+        "Fuel Fill Press": [
             "NC",
             10
         ]
@@ -69,7 +79,7 @@
         "y_axis_min": 0.0,
         "y_axis_max": 700.0,
         "y_axis_autoscale": true,
-        "only_show_actuators_with_roles": false,
+        "only_show_actuators_with_roles": true,
         "only_show_pt_with_roles": true,
         "graph_ma_samples": 1,
         "display_ma_samples": 1
