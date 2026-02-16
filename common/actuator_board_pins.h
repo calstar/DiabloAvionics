@@ -36,6 +36,9 @@ namespace actuator_board_pins {
         int CURRENT_SENSE_8;
         int CURRENT_SENSE_9;
         int CURRENT_SENSE_10;
+
+        // Status LED
+        int LED;
     };
 
     const Layout Actuator_Board = {
@@ -48,7 +51,10 @@ namespace actuator_board_pins {
 
         // CURRENT_SENSE_1 through CURRENT_SENSE_10
         // 18, 9, 13, 11, 1, 17, 8, 10, 12, 2
-        8, 17, 12, 11, 2, 9, 18, 11, 13, 1
+        8, 17, 12, 11, 2, 9, 18, 11, 13, 1,
+
+        // LED
+        15
     };
 
     // Number of actuators
