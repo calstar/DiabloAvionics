@@ -47,6 +47,8 @@ if sys.platform == 'darwin':
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
+# Performance optimization: Use OpenGL and disable anti-aliasing
+pg.setConfigOptions(useOpenGL=True, antialias=False)
 import numpy as np
 
 # Protocol constants from DAQv2-Comms.h
@@ -99,8 +101,8 @@ SENSOR_DATAPOINT_SIZE = 5
 
 # Plotting constants
 DEFAULT_WINDOW_SECONDS = 10.0
-MAX_POINTS = 10000
-UPDATE_INTERVAL_MS = 50  # Update plots every 50ms
+MAX_POINTS = 200000
+UPDATE_INTERVAL_MS = 100  # Update plots every 100ms
 NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
 NUM_ACTUATORS = 10
 # Default role names (used only when config is missing); actual names come from config
@@ -1007,7 +1009,10 @@ class SensorPlotWidget(QtWidgets.QWidget):
         # Data storage: sensor_id -> deque of (timestamp_ms, value)
         self.sensor_data: Dict[int, deque] = {}  # Voltage data for statistics display
         self.sensor_adc_codes: Dict[int, deque] = {}  # Store ADC codes for pressure calculation
-        self.sensor_psi_data: Dict[int, deque] = {}  # PSI data for plotting (calibrated sensors only)
+        # Plot buffers: separate time and psi arrays for fast numpy access (no tuple unpacking)
+        self.sensor_psi_plot_t: Dict[int, deque] = {}  # time values for plotting
+        self.sensor_psi_plot_v: Dict[int, deque] = {}  # psi values for plotting
+        self.sensor_psi_history: Dict[int, list] = {}  # PSI data for CSV saving (full history)
         self.sensor_plots: Dict[int, pg.PlotDataItem] = {}
         self.plot_enabled: Dict[int, bool] = {i: True for i in range(1, NUM_CONNECTORS + 1)}
         
@@ -1028,9 +1033,18 @@ class SensorPlotWidget(QtWidgets.QWidget):
         # Network stats for debug popup
         self.network_stats = {"packets": "0", "pps": "0.0", "bytes": "0 B", "bps": "0.0 B/s"}
         
+        # SPS Calculation
+        self.total_samples_received = 0
+        self.last_sps_sample_count = 0
+        self.last_sps_time = time.time()
+        
         # Load display settings from Config
         disp = CONFIG.config["display"]
         self.window_seconds = disp["window_seconds"]
+        # Dynamic buffer size: window_seconds * 1000 samples/sec (approx) + safety margin
+        self.plot_buffer_size = int(self.window_seconds * 1200) + 1000
+        if self.plot_buffer_size < 1000: self.plot_buffer_size = 1000
+        
         self.adc_bits = disp["adc_bits"]
         self.reference_voltage = disp["ref_voltage"]
         self.y_axis_min = disp["y_axis_min"]
@@ -1235,6 +1249,7 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.legend = None
         # Show grid with white/gray lines for visibility on black background
         self.plot_item.showGrid(x=True, y=True, alpha=0.5)
+        self.plot_item.setClipToView(True)  # Optimize rendering by clipping to view
         # Set grid color to light gray/white
         self.plot_item.getViewBox().setBackgroundColor('k')  # Ensure black background
         
@@ -1258,7 +1273,7 @@ class SensorPlotWidget(QtWidgets.QWidget):
             pass
         
         # Set axis line and text colors to white; thin pen so gridlines (e.g. every 2s) are thinner
-        thin_white = pg.mkPen('w', width=0.5)
+        thin_white = pg.mkPen('w', width=1.0)
         left_axis.setPen(thin_white)
         bottom_axis.setPen(thin_white)
         left_axis.setTextPen('w')
@@ -1266,6 +1281,11 @@ class SensorPlotWidget(QtWidgets.QWidget):
         
         # Pre-initialize plots for all 10 connectors
         self.init_connector_plots()
+        
+        # Add SPS label to plot (bottom-left anchor)
+        self.sps_text_item = pg.TextItem(text="SPS: 0", color=(200, 200, 200), anchor=(0, 1))
+        self.sps_text_item.setPos(0, 0)  # Initial position, will be updated in update_plots/resize
+        self.plot_item.addItem(self.sps_text_item)
     
     def init_connector_plots(self):
         """Pre-initialize plots for all 10 connectors"""
@@ -1274,7 +1294,9 @@ class SensorPlotWidget(QtWidgets.QWidget):
             self.sensor_adc_codes[connector_id] = deque(maxlen=MAX_POINTS)
             # Only initialize PSI data and plots for calibrated sensors
             if connector_id in self.pt_calibration:
-                self.sensor_psi_data[connector_id] = deque(maxlen=MAX_POINTS)
+                self.sensor_psi_plot_t[connector_id] = deque(maxlen=self.plot_buffer_size)
+                self.sensor_psi_plot_v[connector_id] = deque(maxlen=self.plot_buffer_size)
+                self.sensor_psi_history[connector_id] = []
                 self.add_sensor_plot(connector_id)
     
     def reload_pt_calibration(self):
@@ -1290,8 +1312,10 @@ class SensorPlotWidget(QtWidgets.QWidget):
                     self.pt_calibration_error
                 )
         for connector_id in range(1, NUM_CONNECTORS + 1):
-            if connector_id in self.pt_calibration and connector_id not in self.sensor_psi_data:
-                self.sensor_psi_data[connector_id] = deque(maxlen=MAX_POINTS)
+            if connector_id in self.pt_calibration and connector_id not in self.sensor_psi_plot_t:
+                self.sensor_psi_plot_t[connector_id] = deque(maxlen=self.plot_buffer_size)
+                self.sensor_psi_plot_v[connector_id] = deque(maxlen=self.plot_buffer_size)
+                self.sensor_psi_history[connector_id] = []
                 self.add_sensor_plot(connector_id)
         self.update_plots()
         self.update_statistics()
@@ -1322,8 +1346,11 @@ class SensorPlotWidget(QtWidgets.QWidget):
         for k in list(self.sensor_data.keys()):
             self.sensor_data[k] = deque(maxlen=MAX_POINTS)
             self.sensor_adc_codes[k] = deque(maxlen=MAX_POINTS)
-            if k in self.sensor_psi_data:
-                self.sensor_psi_data[k] = deque(maxlen=MAX_POINTS)
+            if k in self.sensor_psi_plot_t:
+                self.sensor_psi_plot_t[k] = deque(maxlen=self.plot_buffer_size)
+                self.sensor_psi_plot_v[k] = deque(maxlen=self.plot_buffer_size)
+            if k in self.sensor_psi_history:
+                self.sensor_psi_history[k] = []
     
     def on_demo_mode_toggled(self, state):
         """Handle Demo mode checkbox: toggle demo_mode, start/stop UDP sender, clear deques.
@@ -1362,6 +1389,19 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 self.demo_send_socket = None
             self._clear_all_sensor_deques()
             self.status_label.setText("Listening")
+    
+    def update_buffer_size(self):
+        """Update plot buffer size based on current window_seconds."""
+        new_size = int(self.window_seconds * 1200) + 1000
+        if new_size < 1000: new_size = 1000
+        
+        if new_size != self.plot_buffer_size:
+            self.plot_buffer_size = new_size
+            # Resize existing deques by creating new ones and copying data
+            # This is expensive but only happens on config change
+            for k in list(self.sensor_psi_plot_t.keys()):
+                self.sensor_psi_plot_t[k] = deque(self.sensor_psi_plot_t[k], maxlen=self.plot_buffer_size)
+                self.sensor_psi_plot_v[k] = deque(self.sensor_psi_plot_v[k], maxlen=self.plot_buffer_size)
     
     def on_graph_moving_avg_changed(self, value):
         """Handle graph moving average window size change"""
@@ -1417,6 +1457,7 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 return  # Ignore data from other sources
         
         current_time = time.time()
+        self.total_samples_received += len(chunks)
         
         for chunk in chunks:
             chunk_timestamp_ms = chunk['timestamp']
@@ -1436,7 +1477,9 @@ class SensorPlotWidget(QtWidgets.QWidget):
                     self.sensor_adc_codes[sensor_id] = deque(maxlen=MAX_POINTS)
                     # Only create PSI storage and plot for calibrated sensors
                     if sensor_id in self.pt_calibration:
-                        self.sensor_psi_data[sensor_id] = deque(maxlen=MAX_POINTS)
+                        self.sensor_psi_plot_t[sensor_id] = deque(maxlen=self.plot_buffer_size)
+                        self.sensor_psi_plot_v[sensor_id] = deque(maxlen=self.plot_buffer_size)
+                        self.sensor_psi_history[sensor_id] = []
                         self.add_sensor_plot(sensor_id)
                 
                 # Add data point (use relative time from start)
@@ -1447,7 +1490,9 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 if sensor_id in self.pt_calibration:
                     a, b, c, d = self.pt_calibration[sensor_id]
                     psi = calculate_pressure(code_uint32, a, b, c, d)
-                    self.sensor_psi_data[sensor_id].append((relative_time, psi))
+                    self.sensor_psi_plot_t[sensor_id].append(relative_time)
+                    self.sensor_psi_plot_v[sensor_id].append(psi)
+                    self.sensor_psi_history[sensor_id].append((relative_time, psi))
     
     def _send_demo_packet(self):
         """Build and send one demo UDP packet to localhost (called by demo timer)."""
@@ -1501,14 +1546,14 @@ class SensorPlotWidget(QtWidgets.QWidget):
     
     def update_plots(self):
         """Update all sensor plots (PSI data for calibrated sensors only)"""
-        if not self.sensor_psi_data:
+        if not self.sensor_psi_plot_t:
             return
         
         current_time = time.time() - self.stats_start_time
         time_window = self.window_seconds
         
         # Only plot calibrated sensors that have PSI data
-        for sensor_id, psi_deque in self.sensor_psi_data.items():
+        for sensor_id in self.sensor_psi_plot_t:
             if sensor_id not in self.sensor_plots:
                 continue
             enabled = self.plot_enabled.get(sensor_id, True)
@@ -1520,37 +1565,47 @@ class SensorPlotWidget(QtWidgets.QWidget):
             self.sensor_plots[sensor_id].setVisible(enabled)
             if not enabled:
                 continue
-            if len(psi_deque) == 0:
+            
+            t_deque = self.sensor_psi_plot_t[sensor_id]
+            v_deque = self.sensor_psi_plot_v[sensor_id]
+            n = len(t_deque)
+            if n == 0:
                 continue
             
-            # Extract time and PSI value arrays
-            times = []
-            psi_values = []
-            
-            for t, psi in psi_deque:
-                # Only show data within the time window
-                if current_time - t <= time_window:
-                    times.append(t)
-                    psi_values.append(psi)
-            
-            if len(times) > 0:
-                # Convert to numpy arrays
-                times_array = np.array(times)
-                psi_array = np.array(psi_values)
+            try:
+                # Fast conversion: deques of floats -> numpy arrays (no tuple unpacking)
+                times_all = np.array(t_deque)
+                psi_all = np.array(v_deque)
                 
+                # Filter by time window using searchsorted (time is sorted)
+                start_time = current_time - time_window
+                start_idx = np.searchsorted(times_all, start_time)
+                
+                times_array = times_all[start_idx:]
+                psi_array = psi_all[start_idx:]
+                
+                if len(times_array) == 0:
+                    self.sensor_plots[sensor_id].setData([], [])
+                    continue
+                
+                # Downsampling: plot at most 1000 points per line
+                MAX_PLOT_POINTS = 1000
+                if len(times_array) > MAX_PLOT_POINTS:
+                    step = len(times_array) // MAX_PLOT_POINTS
+                    times_array = times_array[::step]
+                    psi_array = psi_array[::step]
+
                 # Apply moving average smoothing to graph if window > 1
                 if self.graph_moving_avg_samples > 1 and len(psi_array) >= self.graph_moving_avg_samples:
-                    # Use convolution for efficient moving average
                     kernel = np.ones(self.graph_moving_avg_samples) / self.graph_moving_avg_samples
                     smoothed_psi = np.convolve(psi_array, kernel, mode='valid')
-                    # Adjust times array to match smoothed data length
                     smoothed_times = times_array[self.graph_moving_avg_samples - 1:]
-                    
-                    # Update plot with smoothed data
                     self.sensor_plots[sensor_id].setData(smoothed_times, smoothed_psi)
                 else:
-                    # Update plot with raw data
                     self.sensor_plots[sensor_id].setData(times_array, psi_array)
+            except Exception as e:
+                print(f"Error updating plot for sensor {sensor_id}: {e}")
+                continue
         
         # Update x-axis range
         if current_time > time_window:
@@ -1564,6 +1619,16 @@ class SensorPlotWidget(QtWidgets.QWidget):
         else:
             self.plot_item.setYRange(self.y_axis_min, self.y_axis_max, padding=0)
             self.plot_item.disableAutoRange(axis='y')
+            
+        # Update SPS label position to stay in bottom-left of view
+        view_box = self.plot_item.getViewBox()
+        view_range = view_box.viewRange()
+        x_min = view_range[0][0]
+        y_min = view_range[1][0]
+        # Add small offset from corner
+        x_range = view_range[0][1] - view_range[0][0]
+        y_range = view_range[1][1] - view_range[1][0]
+        self.sps_text_item.setPos(x_min + (x_range * 0.02), y_min + (y_range * 0.1))
     
     def update_statistics(self):
         """Update statistics display"""
@@ -1588,29 +1653,50 @@ class SensorPlotWidget(QtWidgets.QWidget):
         else:
             self.network_stats["bps"] = f"{bps / (1024 * 1024):.2f} MB/s"
 
+        # Update SPS display
+        current_time = time.time()
+        time_diff = current_time - self.last_sps_time
+        sps = 0.0
+        if time_diff >= 0.5:  # Update every 500ms or so (matches stats timer)
+            sample_diff = self.total_samples_received - self.last_sps_sample_count
+            sps = sample_diff / time_diff
+            self.last_sps_sample_count = self.total_samples_received
+            self.last_sps_time = current_time
+            
+            # If we haven't updated in a while, use the calculated value
+            self.current_sps_display = sps
+        else:
+            # maintain previous display value if called too fast
+            sps = getattr(self, 'current_sps_display', 0.0)
+
+        self.sps_text_item.setText(f"SPS: {int(sps)} / PT")
+
         # Update per-connector: under-graph display value and debug_values for popup
         for connector_id in range(1, NUM_CONNECTORS + 1):
             display_text = "---"
             self.debug_values[connector_id] = {"current": None, "moving_avg": None, "psi": None}
-            if connector_id in self.sensor_data and len(self.sensor_data[connector_id]) > 0:
-                values = [v for t, v in self.sensor_data[connector_id]]
-                if values:
-                    current = values[-1]
-                    n_samples = min(self.display_moving_avg_samples, len(values))
-                    moving_avg = sum(values[-n_samples:]) / n_samples
-                    self.debug_values[connector_id]["current"] = current
-                    self.debug_values[connector_id]["moving_avg"] = moving_avg
-                    psi_val = None
-                    if connector_id in self.pt_calibration and connector_id in self.sensor_adc_codes and len(self.sensor_adc_codes[connector_id]) > 0:
-                        adc_values = [code for t, code in self.sensor_adc_codes[connector_id]]
-                        n_samples_adc = min(self.display_moving_avg_samples, len(adc_values))
-                        moving_avg_adc = sum(adc_values[-n_samples_adc:]) / n_samples_adc
-                        a, b, c, d = self.pt_calibration[connector_id]
-                        psi_val = calculate_pressure(moving_avg_adc, a, b, c, d)
-                        self.debug_values[connector_id]["psi"] = psi_val
-                        display_text = f"<span style='font-size:16pt; font-weight:600'>{psi_val:.2f}</span> <span style='font-size:8pt'>psi</span>"
-                    else:
-                        display_text = f"<span style='font-size:16pt; font-weight:600'>{moving_avg:.4f}</span> <span style='font-size:8pt'>V</span>"
+            d = self.sensor_data.get(connector_id)
+            if d and len(d) > 0:
+                # Only access last N elements — NOT the whole 200k deque
+                n_samples = min(self.display_moving_avg_samples, len(d))
+                # Iterate only the tail of the deque (O(n_samples) not O(len(d)))
+                tail_values = [d[-1 - j][1] for j in range(n_samples)]
+                current = d[-1][1]
+                moving_avg = sum(tail_values) / n_samples
+                self.debug_values[connector_id]["current"] = current
+                self.debug_values[connector_id]["moving_avg"] = moving_avg
+                psi_val = None
+                adc_d = self.sensor_adc_codes.get(connector_id)
+                if connector_id in self.pt_calibration and adc_d and len(adc_d) > 0:
+                    n_adc = min(self.display_moving_avg_samples, len(adc_d))
+                    adc_tail = [adc_d[-1 - j][1] for j in range(n_adc)]
+                    moving_avg_adc = sum(adc_tail) / n_adc
+                    a, b, c, dd = self.pt_calibration[connector_id]
+                    psi_val = calculate_pressure(moving_avg_adc, a, b, c, dd)
+                    self.debug_values[connector_id]["psi"] = psi_val
+                    display_text = f"<span style='font-size:16pt; font-weight:600'>{psi_val:.2f}</span> <span style='font-size:8pt'>psi</span>"
+                else:
+                    display_text = f"<span style='font-size:16pt; font-weight:600'>{moving_avg:.4f}</span> <span style='font-size:8pt'>V</span>"
             if connector_id in self.under_graph_labels:
                 enabled = self.plot_enabled.get(connector_id, True)
                 # If "only show PTs with roles" is enabled, hide PTs without names
@@ -1626,13 +1712,13 @@ class SensorPlotWidget(QtWidgets.QWidget):
     def save_pressures_csv(self):
         """Save pressure data to CSV file, respecting only_show_pt_with_roles setting."""
         # Check if we have any pressure data
-        if not self.sensor_psi_data:
+        if not self.sensor_psi_history:
             QtWidgets.QMessageBox.warning(self, "No Data", "No pressure data available to export.")
             return
         
         # Filter sensors based on settings
         sensors_to_save = []
-        for sensor_id in sorted(self.sensor_psi_data.keys()):
+        for sensor_id in sorted(self.sensor_psi_history.keys()):
             if self.only_show_pt_with_roles:
                 # Only include sensors with roles (non-empty labels)
                 label = self.sensor_labels.get(sensor_id, "")
@@ -1675,10 +1761,16 @@ class SensorPlotWidget(QtWidgets.QWidget):
                         header.append(f"PT{sensor_id} (psi)")
                 writer.writerow(header)
                 
-                # Collect all unique timestamps across selected sensors
+                # Collect all data into a dictionary for O(1) lookup:
+                # data_map[timestamp][sensor_id] = psi_value
+                data_map = {}
                 all_times = set()
+                
                 for sensor_id in sensors_to_save:
-                    for t, _ in self.sensor_psi_data[sensor_id]:
+                    for t, psi in self.sensor_psi_history[sensor_id]:
+                        if t not in data_map:
+                            data_map[t] = {}
+                        data_map[t][sensor_id] = psi
                         all_times.add(t)
                 
                 if not all_times:
@@ -1688,14 +1780,14 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 # Write data row by row
                 for t in sorted(all_times):
                     row = [f"{t:.6f}"]
+                    row_data = data_map[t]
                     for sensor_id in sensors_to_save:
-                        # Find the pressure value at this timestamp for this sensor
-                        val = ""
-                        for ts, psi in self.sensor_psi_data[sensor_id]:
-                            if ts == t:
-                                val = f"{psi:.6f}"
-                                break
-                        row.append(val)
+                        # Direct lookup instead of loop
+                        val = row_data.get(sensor_id, "")
+                        if val != "":
+                            row.append(f"{val:.6f}")
+                        else:
+                            row.append("")
                     writer.writerow(row)
             
             QtWidgets.QMessageBox.information(self, "Success", f"Saved pressures CSV to {filename}")
@@ -2782,7 +2874,7 @@ class TopBarWidget(QtWidgets.QWidget):
                 border-color: #303030;
             }
         """)
-        self.nav_btn.clicked.connect(lambda: self.navigation_requested.emit("settings"))
+        self.nav_btn.clicked.connect(self.toggle_view)
         
         # Add buttons to layout
         bottom_row = QtWidgets.QHBoxLayout()
@@ -3620,6 +3712,7 @@ class SettingsWidget(QtWidgets.QWidget):
     def on_time_changed(self, val):
         self.time_lbl.setText(f"{val}s")
         self.sensor_widget.window_seconds = float(val)
+        self.sensor_widget.update_buffer_size()  # Update buffer size dynamically
         CONFIG.config["display"]["window_seconds"] = float(val)
         CONFIG.save()
 
@@ -3926,12 +4019,12 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
     def _get_gauge_pressure(self, gauge_name: str) -> float:
         """Return latest pressure (psi) for the given gauge (GN2, ETH, LOX), or 0.0 if no data."""
         pt_id = self.gauge_map.get(gauge_name, 0)
-        if pt_id <= 0 or pt_id not in self.sensor_widget.sensor_psi_data:
+        if pt_id <= 0 or pt_id not in self.sensor_widget.sensor_psi_plot_v:
             return 0.0
-        deque_data = self.sensor_widget.sensor_psi_data[pt_id]
+        deque_data = self.sensor_widget.sensor_psi_plot_v[pt_id]
         if len(deque_data) == 0:
             return 0.0
-        return deque_data[-1][1]
+        return deque_data[-1]
 
     def _check_auto_state_transitions(self):
         """If current state and pressures meet threshold rules, automatically transition state."""
@@ -3966,9 +4059,9 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
             
             # Helper to get PSI
             def get_psi(pt_id):
-                if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_data:
-                    d = self.sensor_widget.sensor_psi_data[pt_id]
-                    if d: return d[-1][1]
+                if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_plot_v:
+                    d = self.sensor_widget.sensor_psi_plot_v[pt_id]
+                    if d: return d[-1]
                 return 0.0
             
             p_fuel = get_psi(fuel_upstream_pt)
@@ -4008,10 +4101,10 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         # Accessing private data sensor_psi_data directly for simplicity given the code structure
         for gauge, pt_id in self.gauge_map.items():
             val = 0.0
-            if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_data:
-                deque_data = self.sensor_widget.sensor_psi_data[pt_id]
+            if pt_id > 0 and pt_id in self.sensor_widget.sensor_psi_plot_v:
+                deque_data = self.sensor_widget.sensor_psi_plot_v[pt_id]
                 if len(deque_data) > 0:
-                    val = deque_data[-1][1] # (time, psi)
+                    val = deque_data[-1]  # just the psi value (no tuple)
             
             if gauge == "GN2":
                 self.top_bar_widget.bar_gn2.set_value(val)
