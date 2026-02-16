@@ -391,15 +391,19 @@ if __name__ == "__main__":
     filename = file_base + f"_test{test_num}" + file_ext
 
     # Write CSV header
+    # Use connector numbers in the header so tools like combined_gui.py
+    # can map calibration data directly by connector ID.
     with open(filename, "w", newline='') as f:
         writer = csv.writer(f, delimiter=",")
         header = []
-        for pt_num in range(instrument_count):
+        for pt_index in range(instrument_count):
+            connector_id = instrument_to_connector[pt_index]
+            base_label = f"PT{connector_id}"
             pt_header = [
-                f"PT{pt_num + 1} ADC Code",
-                f"PT{pt_num + 1} Pressure"
+                f"{base_label} ADC Code",
+                f"{base_label} Pressure",
             ]
-            pt_header.extend([f"PT{pt_num + 1} Coefficient {k}" for k in range(poly_order + 1)])
+            pt_header.extend([f"{base_label} Coefficient {k}" for k in range(poly_order + 1)])
             header.extend(pt_header)
         writer.writerow(header)
 
