@@ -1588,12 +1588,13 @@ class SensorPlotWidget(QtWidgets.QWidget):
                     self.sensor_plots[sensor_id].setData([], [])
                     continue
                 
-                # Downsampling: plot at most 1000 points per line
-                MAX_PLOT_POINTS = 1000
+                # Stable downsampling: use linspace indices so the same
+                # points are selected even as the array grows by 1 each frame
+                MAX_PLOT_POINTS = 2000
                 if len(times_array) > MAX_PLOT_POINTS:
-                    step = len(times_array) // MAX_PLOT_POINTS
-                    times_array = times_array[::step]
-                    psi_array = psi_array[::step]
+                    indices = np.linspace(0, len(times_array) - 1, MAX_PLOT_POINTS, dtype=int)
+                    times_array = times_array[indices]
+                    psi_array = psi_array[indices]
 
                 # Apply moving average smoothing to graph if window > 1
                 if self.graph_moving_avg_samples > 1 and len(psi_array) >= self.graph_moving_avg_samples:
@@ -1615,7 +1616,35 @@ class SensorPlotWidget(QtWidgets.QWidget):
         
         # Update y-axis range based on auto-scale setting
         if self.y_axis_auto_scale:
-            self.plot_item.enableAutoRange(axis='y')
+            # Disable pyqtgraph's built-in auto-range and compute our own with smoothing
+            self.plot_item.disableAutoRange(axis='y')
+            # Compute actual min/max from all visible enabled plot data
+            y_lo, y_hi = float('inf'), float('-inf')
+            for sid in self.sensor_psi_plot_t:
+                if sid not in self.sensor_plots or not self.sensor_plots[sid].isVisible():
+                    continue
+                vd = self.sensor_psi_plot_v[sid]
+                td = self.sensor_psi_plot_t[sid]
+                if len(vd) == 0:
+                    continue
+                # Quick scan: only check last plot_buffer worth of data (already bounded)
+                t_arr = np.array(td)
+                v_arr = np.array(vd)
+                mask = t_arr >= (current_time - time_window)
+                visible = v_arr[mask]
+                if len(visible) > 0:
+                    y_lo = min(y_lo, float(visible.min()))
+                    y_hi = max(y_hi, float(visible.max()))
+            if y_lo < y_hi:
+                pad = max((y_hi - y_lo) * 0.05, 1.0)  # 5% padding, minimum 1 psi
+                target_lo = y_lo - pad
+                target_hi = y_hi + pad
+                # Smooth transition: blend toward target (prevents frame-to-frame jitter)
+                alpha = 0.15  # smoothing factor (0=no change, 1=instant snap)
+                prev = self.plot_item.viewRange()[1]  # [y_min, y_max]
+                new_lo = prev[0] + alpha * (target_lo - prev[0])
+                new_hi = prev[1] + alpha * (target_hi - prev[1])
+                self.plot_item.setYRange(new_lo, new_hi, padding=0)
         else:
             self.plot_item.setYRange(self.y_axis_min, self.y_axis_max, padding=0)
             self.plot_item.disableAutoRange(axis='y')
@@ -3324,6 +3353,16 @@ class SettingsWidget(QtWidgets.QWidget):
         adc_group.setLayout(adc_layout)
         left_col.addWidget(adc_group)
         
+        # Reset button — clears all stored sensor data, history, and event log
+        reset_btn = QtWidgets.QPushButton("⟳  Reset All Data")
+        reset_btn.setStyleSheet(
+            "QPushButton { background-color: #8B0000; color: white; font-weight: bold; padding: 8px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #A00000; }"
+        )
+        reset_btn.setToolTip("Clear all plot data, history (CSV buffer), and event log")
+        reset_btn.clicked.connect(self._on_reset_all_data)
+        left_col.addWidget(reset_btn)
+        
         left_col.addStretch()
         
         # Wrap left column in scroll area
@@ -3708,6 +3747,46 @@ class SettingsWidget(QtWidgets.QWidget):
         # or we update a variable in CombinedMainWindow if we really want to.
         # Let's update the Config object which is shared.
         pass
+
+    def _on_reset_all_data(self):
+        """Clear all stored sensor data, plot buffers, CSV history, and event log."""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Reset All Data",
+            "This will clear all plot data, CSV history, and the event log.\n\nAre you sure?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        
+        # Clear sensor data
+        sw = self.sensor_widget
+        for k in list(sw.sensor_data.keys()):
+            sw.sensor_data[k] = deque(maxlen=MAX_POINTS)
+            sw.sensor_adc_codes[k] = deque(maxlen=MAX_POINTS)
+        for k in list(sw.sensor_psi_plot_t.keys()):
+            sw.sensor_psi_plot_t[k] = deque(maxlen=sw.plot_buffer_size)
+            sw.sensor_psi_plot_v[k] = deque(maxlen=sw.plot_buffer_size)
+        for k in list(sw.sensor_psi_history.keys()):
+            sw.sensor_psi_history[k] = []
+        
+        # Reset sample counters and timing
+        sw.total_samples_received = 0
+        sw.last_sps_sample_count = 0
+        sw.last_sps_time = time.time()
+        sw.stats_start_time = time.time()
+        
+        # Clear event log on the main window
+        main_win = sw.main_window_ref if hasattr(sw, 'main_window_ref') and sw.main_window_ref else None
+        if main_win and hasattr(main_win, 'event_log'):
+            main_win.event_log.clear()
+        
+        # Clear plots visually
+        for plot in sw.sensor_plots.values():
+            plot.setData([], [])
+        
+        sw.update_statistics()
+        print("All data reset.")
 
     def on_time_changed(self, val):
         self.time_lbl.setText(f"{val}s")
