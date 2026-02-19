@@ -81,8 +81,8 @@
         "y_axis_autoscale": true,
         "only_show_actuators_with_roles": true,
         "only_show_pt_with_roles": true,
-        "graph_ma_samples": 1,
-        "display_ma_samples": 1
+        "graph_ma_samples": 6,
+        "display_ma_samples": 6
     },
     "mappings": {
         "GN2": 6,
@@ -119,5 +119,5 @@
         "state_machine_csv": "state_machine_actuators.csv",
         "state_transitions_csv": "state_transitions.csv"
     },
-    "simulate_chamber_pressure": false
+    "simulate_chamber_pressure": true
 }
