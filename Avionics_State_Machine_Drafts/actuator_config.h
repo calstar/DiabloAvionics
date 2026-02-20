@@ -13,6 +13,8 @@
 #define HEARTBEAT_TIMEOUT_MS             5000   // Server heartbeat watchdog
 #define CONNECTION_LOSS_GRACE_MS        10000   // Time in Connection Loss before No Connection Abort
 #define NO_CONNECTION_ABORT_DONE_MS    10000   // After this in No Connection Abort -> Abort Finished
+#define NO_CONN_ABORT_PT_WAIT_MS        2000   // Wait for PT data in NoConnectionAbort before PT Abort / No PT Abort
+#define STANDALONE_ABORT_PT_LOSS_MS     3000   // In ConnectionLossDetected, if no PT data from config for this long -> StandaloneAbort
 
 // LED status blink
 #define LED_CYCLE_MS                     5000   // Cycle period for state-blink
