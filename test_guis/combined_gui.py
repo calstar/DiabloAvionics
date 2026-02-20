@@ -613,54 +613,81 @@ def load_pt_calibration(csv_paths) -> Tuple[Dict[int, Tuple[float, float, float,
     # Track which CSV file contains which PT numbers (for duplicate reporting)
     csv_pt_map = {}  # csv_path -> set of pt_nums
     
-    # Load each CSV and merge results
-    for csv_path in csv_paths:
-        if not csv_path or not csv_path.strip():
+    # Load each file and merge results
+    for file_path in csv_paths:
+        if not file_path or not file_path.strip():
             continue
-        csv_path = csv_path.strip()
-        if not os.path.isfile(csv_path):
+        file_path = file_path.strip()
+        
+        # Resolve relative paths relative to this script's directory
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), file_path)
+            
+        if not os.path.isfile(file_path):
             continue
         
         try:
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-                fieldnames = reader.fieldnames or []
-            if not rows:
-                continue
-            
-            # Discover PT numbers from column names (e.g. "PT1 Coefficient 0" -> pt_num 1)
-            pt_nums = set()
-            for col in fieldnames:
-                m = re.match(r"PT(\d+)\s+Coefficient\s+0", col, re.IGNORECASE)
-                if m:
-                    pt_nums.add(int(m.group(1)))
-            
-            csv_pt_map[csv_path] = pt_nums
-            
-            # Use last row for coefficients (final calibration state)
-            last = rows[-1]
-            for pt_num in sorted(pt_nums):
-                # Check for duplicates
-                if pt_num in result:
-                    if pt_num not in duplicates:
-                        duplicates[pt_num] = []
-                        # Find which CSV(s) already had this PT
-                        for prev_path, prev_pt_nums in csv_pt_map.items():
-                            if prev_path == csv_path:
-                                continue  # Skip current CSV
-                            if pt_num in prev_pt_nums:
-                                duplicates[pt_num].append(os.path.basename(prev_path))
-                    duplicates[pt_num].append(os.path.basename(csv_path))
-                    continue  # Skip this duplicate
+            if file_path.lower().endswith('.json'):
+                with open(file_path, 'r', encoding="utf-8") as f:
+                    data = json.load(f)
+                    polys = data.get("calibration_polynomials", {})
+                    for pt_id_str, coeffs in polys.items():
+                        pt_num = int(pt_id_str)
+                        if pt_num in result:
+                             # Duplicate handling logic
+                             if pt_num not in duplicates:
+                                duplicates[pt_num] = []
+                                for prev_path, prev_pt_nums in csv_pt_map.items():
+                                    if pt_num in prev_pt_nums:
+                                        duplicates[pt_num].append(os.path.basename(prev_path))
+                             duplicates[pt_num].append(os.path.basename(file_path))
+                             continue
+                        
+                        if len(coeffs) == 4:
+                            result[pt_num] = tuple(coeffs)
+                            if file_path not in csv_pt_map:
+                                csv_pt_map[file_path] = set()
+                            csv_pt_map[file_path].add(pt_num)
+            else:
+                with open(file_path, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+                    fieldnames = reader.fieldnames or []
+                if not rows:
+                    continue
                 
-                a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
-                b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
-                c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
-                d = float(last.get(f"PT{pt_num} Coefficient 3", 0))
-                result[pt_num] = (a, b, c, d)
+                # Discover PT numbers from column names (e.g. "PT1 Coefficient 0" -> pt_num 1)
+                pt_nums = set()
+                for col in fieldnames:
+                    m = re.match(r"PT(\d+)\s+Coefficient\s+0", col, re.IGNORECASE)
+                    if m:
+                        pt_nums.add(int(m.group(1)))
+                
+                csv_pt_map[file_path] = pt_nums
+                
+                # Use last row for coefficients (final calibration state)
+                last = rows[-1]
+                for pt_num in sorted(pt_nums):
+                    # Check for duplicates
+                    if pt_num in result:
+                        if pt_num not in duplicates:
+                            duplicates[pt_num] = []
+                            # Find which file(s) already had this PT
+                            for prev_path, prev_pt_nums in csv_pt_map.items():
+                                if prev_path == file_path:
+                                    continue  # Skip current file
+                                if pt_num in prev_pt_nums:
+                                    duplicates[pt_num].append(os.path.basename(prev_path))
+                        duplicates[pt_num].append(os.path.basename(file_path))
+                        continue  # Skip this duplicate
+                    
+                    a = float(last.get(f"PT{pt_num} Coefficient 0", 0))
+                    b = float(last.get(f"PT{pt_num} Coefficient 1", 0))
+                    c = float(last.get(f"PT{pt_num} Coefficient 2", 0))
+                    d = float(last.get(f"PT{pt_num} Coefficient 3", 0))
+                    result[pt_num] = (a, b, c, d)
         except Exception as e:
-            return result, f"Error loading {os.path.basename(csv_path)}: {str(e)}"
+            return result, f"Error loading {os.path.basename(file_path)}: {str(e)}"
     
     # Build error message if duplicates found
     if duplicates:
@@ -1045,6 +1072,8 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.pt_calibration, self.pt_calibration_error = load_pt_calibration(CONFIG.get_pt_calibration_csv_paths())
         if self.pt_calibration_error:
             print(f"PT Calibration Error: {self.pt_calibration_error}")
+        # Per-sensor PSI offsets for zeroing (sensor_id -> psi offset to subtract)
+        self.pt_offsets: Dict[int, float] = {}
         
         # Reference to main window for event tracking (set by main window)
         self.main_window_ref = None
@@ -1343,6 +1372,23 @@ class SensorPlotWidget(QtWidgets.QWidget):
         self.update_plots()
         self.update_statistics()
     
+    def zero_pts(self):
+        """Zero all PTs: capture current PSI reading for each calibrated sensor and store as offset."""
+        for connector_id in list(self.pt_calibration.keys()):
+            adc_d = self.sensor_adc_codes.get(connector_id)
+            if not adc_d or len(adc_d) == 0:
+                continue
+            n = min(self.display_moving_avg_samples, len(adc_d))
+            adc_tail = [adc_d[-1 - j][1] for j in range(n)]
+            moving_avg_adc = sum(adc_tail) / n
+            a, b, c, d = self.pt_calibration[connector_id]
+            raw_psi = calculate_pressure(moving_avg_adc, a, b, c, d)
+            self.pt_offsets[connector_id] = raw_psi
+
+    def clear_pt_zeros(self):
+        """Clear all PT zero offsets (restore raw calibration output)."""
+        self.pt_offsets.clear()
+
     def _on_plot_toggle(self, connector_id: int, state):
         self.plot_enabled[connector_id] = bool(state)
         if connector_id in self.under_graph_containers:
@@ -1526,10 +1572,11 @@ class SensorPlotWidget(QtWidgets.QWidget):
                 # Calculate and store PSI if calibration exists
                 if sensor_id in self.pt_calibration:
                     a, b, c, d = self.pt_calibration[sensor_id]
-                    psi = calculate_pressure(code_uint32, a, b, c, d)
+                    raw_psi = calculate_pressure(code_uint32, a, b, c, d)
+                    offset = self.pt_offsets.get(sensor_id, 0.0)
                     self.sensor_psi_plot_t[sensor_id].append(relative_time)
-                    self.sensor_psi_plot_v[sensor_id].append(psi)
-                    self.sensor_psi_history[sensor_id].append((relative_time, psi))
+                    self.sensor_psi_plot_v[sensor_id].append(raw_psi - offset)  # plot shows zeroed
+                    self.sensor_psi_history[sensor_id].append((relative_time, raw_psi))  # history stores raw
     
     def _send_demo_packet(self):
         """Build and send one demo UDP packet to localhost (called by demo timer)."""
@@ -1758,7 +1805,7 @@ class SensorPlotWidget(QtWidgets.QWidget):
                     adc_tail = [adc_d[-1 - j][1] for j in range(n_adc)]
                     moving_avg_adc = sum(adc_tail) / n_adc
                     a, b, c, dd = self.pt_calibration[connector_id]
-                    psi_val = calculate_pressure(moving_avg_adc, a, b, c, dd)
+                    psi_val = calculate_pressure(moving_avg_adc, a, b, c, dd) - self.pt_offsets.get(connector_id, 0.0)
                     self.debug_values[connector_id]["psi"] = psi_val
                     display_text = f"<span style='font-size:16pt; font-weight:600'>{psi_val:.2f}</span> <span style='font-size:8pt'>psi</span>"
                 else:
@@ -1857,6 +1904,40 @@ class SensorPlotWidget(QtWidgets.QWidget):
                     writer.writerow(row)
             
             QtWidgets.QMessageBox.information(self, "Success", f"Saved pressures CSV to {filename}")
+
+            # If PT offsets are active, also auto-save a companion _zeroed.csv
+            if self.pt_offsets:
+                zeroed_filename = filename.replace(".csv", "_zeroed.csv")
+                if zeroed_filename == filename:
+                    zeroed_filename = filename + "_zeroed.csv"
+                try:
+                    with open(zeroed_filename, 'w', newline='', encoding='utf-8') as zf:
+                        zwriter = csv.writer(zf)
+                        # Header
+                        zheader = ["Time (s)"]
+                        for sensor_id in sensors_to_save:
+                            label = self.sensor_labels.get(sensor_id, "")
+                            col = f"PT{sensor_id}: {label} (psi, zeroed)" if label else f"PT{sensor_id} (psi, zeroed)"
+                            zheader.append(col)
+                        zwriter.writerow(zheader)
+                        # Data rows with offset applied
+                        for t in sorted(all_times):
+                            row = [f"{t:.6f}"]
+                            row_data = data_map[t]
+                            for sensor_id in sensors_to_save:
+                                val = row_data.get(sensor_id, "")
+                                if val != "":
+                                    zeroed_val = val - self.pt_offsets.get(sensor_id, 0.0)
+                                    row.append(f"{zeroed_val:.6f}")
+                                else:
+                                    row.append("")
+                            zwriter.writerow(row)
+                    QtWidgets.QMessageBox.information(
+                        self, "Zeroed CSV Saved",
+                        f"Also saved zeroed pressures to:\n{zeroed_filename}"
+                    )
+                except Exception as ze:
+                    QtWidgets.QMessageBox.warning(self, "Zeroed CSV Error", f"Could not save zeroed CSV: {ze}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"CSV save error: {e}")
     
@@ -3371,7 +3452,25 @@ class SettingsWidget(QtWidgets.QWidget):
         self.debug_btn = QtWidgets.QPushButton("Open debug panel…")
         self.debug_btn.clicked.connect(self.sensor_widget.open_debug_menu)
         visibility_layout.addWidget(self.debug_btn)
+
+        # PT Zeroing buttons
+        zero_row = QtWidgets.QHBoxLayout()
+        self.zero_pts_btn = QtWidgets.QPushButton("0 PTs")
+        self.zero_pts_btn.setToolTip("Set current PSI readings as zero reference (tare all PTs)")
+        self.zero_pts_btn.setStyleSheet("QPushButton { background-color: #e67e22; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px; }"
+                                        "QPushButton:hover { background-color: #d35400; }")
+        self.zero_pts_btn.clicked.connect(self.on_zero_pts)
+        self.clear_zeros_btn = QtWidgets.QPushButton("Clear Zeros")
+        self.clear_zeros_btn.setToolTip("Remove zero offset — restore raw calibration values")
+        self.clear_zeros_btn.setStyleSheet("QPushButton { background-color: #555; color: white; padding: 4px 8px; border-radius: 4px; }"
+                                           "QPushButton:hover { background-color: #333; }")
+        self.clear_zeros_btn.clicked.connect(self.on_clear_pt_zeros)
+        zero_row.addWidget(self.zero_pts_btn)
+        zero_row.addWidget(self.clear_zeros_btn)
+        visibility_layout.addLayout(zero_row)
+
         visibility_group.setLayout(visibility_layout)
+
         left_col.addWidget(visibility_group)
         
         # ADC Settings
@@ -3854,6 +3953,14 @@ class SettingsWidget(QtWidgets.QWidget):
         # Trigger immediate update of plots and under-graph display
         self.sensor_widget.update_plots()
         self.sensor_widget.update_statistics()
+
+    def on_zero_pts(self):
+        """Capture current PSI readings as zero offsets for all PTs."""
+        self.sensor_widget.zero_pts()
+
+    def on_clear_pt_zeros(self):
+        """Clear all PT zero offsets."""
+        self.sensor_widget.clear_pt_zeros()
 
     def on_adc_bits_changed(self, val):
         self.sensor_widget.adc_bits = val

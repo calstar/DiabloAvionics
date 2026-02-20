@@ -75,7 +75,7 @@
     "display": {
         "adc_bits": 32,
         "ref_voltage": 2.5,
-        "window_seconds": 26.0,
+        "window_seconds": 10.0,
         "y_axis_min": 0.0,
         "y_axis_max": 700.0,
         "y_axis_autoscale": true,
@@ -113,8 +113,7 @@
     "num_actuators": 10,
     "paths": {
         "pt_calibration_csv": [
-            "pt_cali1.csv",
-            "pt_cali2.csv"
+            "calibration_20260219_160025.json"
         ],
         "state_machine_csv": "state_machine_actuators.csv",
         "state_transitions_csv": "state_transitions.csv"
