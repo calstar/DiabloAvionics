@@ -128,7 +128,7 @@ DEFAULT_WINDOW_SECONDS = 10.0
 MAX_POINTS = 200000
 UPDATE_INTERVAL_MS = 100  # Update plots every 100ms
 NUM_CONNECTORS = 10  # Number of connectors being cycled (1-10)
-NUM_ACTUATORS = 10
+# NUM_ACTUATORS removed - use get_num_actuators() function instead
 # Default role names (used only when config is missing); actual names come from config
 DEFAULT_ACTUATOR_ROLE_NAMES = ["LOX Main", "Fuel Main", "Fuel Vent", "Fuel Press", "LOX Vent", "LOX Press"]
 DEFAULT_SENSOR_ROLE_NAMES = ["LOX Upstream", "LOX Downstream", "Low Press PT", "Fuel Downstream"]
@@ -304,6 +304,21 @@ class ConfigManager:
         return int(self.config.get("num_connectors", 10))
 
     def get_num_actuators(self):
+        """Get number of actuators, dynamically determined from CSV if available."""
+        # Try to get from CSV first
+        csv_path = self.get_state_machine_csv_path()
+        if csv_path.exists():
+            try:
+                _, num_actuators = load_state_machine_csv(csv_path)
+                if num_actuators > 0:
+                    # Update config with discovered count
+                    if self.config.get("num_actuators", 10) != num_actuators:
+                        self.config["num_actuators"] = num_actuators
+                        self.save()
+                    return num_actuators
+            except Exception as e:
+                print(f"Warning: Could not determine actuator count from CSV: {e}")
+        # Fallback to config or default
         return int(self.config.get("num_actuators", 10))
 
     def get_pt_calibration_csv_paths(self):
@@ -413,22 +428,28 @@ class ConfigManager:
 CONFIG = ConfigManager()
 # Apply config-driven counts so rest of code can use NUM_CONNECTORS / NUM_ACTUATORS
 NUM_CONNECTORS = CONFIG.get_num_connectors()
-NUM_ACTUATORS = CONFIG.get_num_actuators()
+# NUM_ACTUATORS is now dynamic - use get_num_actuators() function instead of constant
+def get_num_actuators():
+    """Get number of actuators dynamically from CSV/config."""
+    return CONFIG.get_num_actuators()
 
 pg.setConfigOptions(antialias=False)
 
 
 # ---------------------- State Machine CSV Loading ----------------------
-def load_state_machine_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
+def load_state_machine_csv(csv_path: Path) -> tuple[Dict[str, Dict[str, str]], int]:
     """
     Load state machine CSV file.
-    Returns dict: state_name -> {actuator_abbrev -> OPEN/CLOSE}
+    Returns tuple: (state_machine_dict, num_actuators)
+    state_machine_dict: state_name -> {actuator_abbrev -> OPEN/CLOSE}
+    num_actuators: number of actuators found in CSV
     CSV format: first row is header with state names (first column empty), first column of data rows is actuator abbreviations
     """
     state_machine = {}
+    num_actuators = 0
     if not csv_path.exists():
         print(f"Warning: State machine CSV not found at {csv_path}")
-        return state_machine
+        return state_machine, num_actuators
     
     try:
         with open(csv_path, 'r', newline='', encoding='utf-8') as f:
@@ -437,7 +458,7 @@ def load_state_machine_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
             
             if len(rows) < 2:
                 print(f"Warning: State machine CSV has insufficient rows")
-                return state_machine
+                return state_machine, num_actuators
             
             # First row is header: empty first cell, then state names
             header = rows[0]
@@ -450,6 +471,8 @@ def load_state_machine_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
                 actuator_abbrev = row[0].strip()
                 if not actuator_abbrev:
                     continue
+                
+                num_actuators += 1
                 
                 # For each state, store the OPEN/CLOSE value
                 for i, state in enumerate(states):
@@ -469,7 +492,7 @@ def load_state_machine_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
         import traceback
         traceback.print_exc()
     
-    return state_machine
+    return state_machine, num_actuators
 
 
 def load_state_transitions_csv(csv_path: Path) -> Dict[str, Dict[str, bool]]:
@@ -544,10 +567,10 @@ def apply_state_from_csv(actuator_widget, state_name: str, state_machine: Dict[s
     abbrev_to_role = CONFIG.get_actuator_abbrev_to_role()
     state_config = state_machine[state_name]
 
-    # Build desired GUI state for all actuators (1..NUM_ACTUATORS).
+    # Build desired GUI state for all actuators (1..N).
     # Default anything not specified by the CSV mapping to CLOSED (0) so the right-side
     # actuator display always reflects the full state when a mode is pressed.
-    desired_by_actuator_id: Dict[int, int] = {aid: 0 for aid in range(1, NUM_ACTUATORS + 1)}
+    desired_by_actuator_id: Dict[int, int] = {aid: 0 for aid in range(1, get_num_actuators() + 1)}
 
     # Fill desired states from CSV for the mapped actuators
     for abbrev, action in state_config.items():
@@ -565,12 +588,12 @@ def apply_state_from_csv(actuator_widget, state_name: str, state_machine: Dict[s
         # Convert OPEN/CLOSE to GUI state (1 = OPEN, 0 = CLOSED)
         gui_state = 1 if action == 'OPEN' else 0
         # Only write if actuator_id is in our expected range
-        if 1 <= actuator_id <= NUM_ACTUATORS:
+        if 1 <= actuator_id <= get_num_actuators():
             desired_by_actuator_id[actuator_id] = gui_state
 
     # Apply to widget: update UI + send commands for any actuators that change.
     # Use force=True to bypass manual control lock
-    for actuator_id in range(1, NUM_ACTUATORS + 1):
+    for actuator_id in range(1, get_num_actuators() + 1):
         desired = desired_by_actuator_id.get(actuator_id, 0)
         array_idx = actuator_id - 1
         current = actuator_widget.actuator_states[array_idx] if 0 <= array_idx < len(actuator_widget.actuator_states) else None
@@ -2013,13 +2036,13 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         self.device_ip = CONFIG.config["network"]["actuator_ip"]
         self.device_port = CONFIG.config["network"]["actuator_port"]
         
-        # Actuator state tracking (1-indexed: 1-10)
+        # Actuator state tracking (1-indexed: 1-N)
         # GUI state: 0 = CLOSED, 1 = OPEN
-        self.actuator_states = [0] * NUM_ACTUATORS
+        self.actuator_states = [0] * get_num_actuators()
         
-        # Actuator NC/NO type mapping (1-indexed: 1-10)
+        # Actuator NC/NO type mapping (1-indexed: 1-N)
         # Maps actuator ID to 'NC' or 'NO'
-        self.actuator_types = {i: CONFIG.get_actuator_type_by_id(i) for i in range(1, NUM_ACTUATORS + 1)}
+        self.actuator_types = {i: CONFIG.get_actuator_type_by_id(i) for i in range(1, get_num_actuators() + 1)}
         
         # Reference to main window for event tracking (set by main window)
         self.main_window_ref = None
@@ -2030,12 +2053,12 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         # Manual control lock: True = manual control enabled (DEBUG button), False = locked
         self.manual_control_enabled = False  # Default to False (locked) on startup
         
-        # Voltage readings (0-indexed: 0-9, maps to actuator 1-10)
+        # Voltage readings (0-indexed: 0-(N-1), maps to actuator 1-N)
         # Store as voltage in Volts
-        self.voltage_readings = [0.0] * NUM_ACTUATORS
+        self.voltage_readings = [0.0] * get_num_actuators()
         
-        # Actuator labels (1-indexed: 1-10)
-        self.actuator_labels = {i: CONFIG.get_actuator_label(i) for i in range(1, NUM_ACTUATORS + 1)}
+        # Actuator labels (1-indexed: 1-N)
+        self.actuator_labels = {i: CONFIG.get_actuator_label(i) for i in range(1, get_num_actuators() + 1)}
         
         # Load display settings from Config
         disp = CONFIG.config["display"]
@@ -2062,19 +2085,28 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         
         # Top panel removed - no status label needed
         
-        # Main content area with actuators in a grid: 2 columns x 5 rows
+        # Main content area with actuators in a dynamic grid
         self.grid_container = QtWidgets.QWidget()
         self.grid_layout = QtWidgets.QGridLayout(self.grid_container)
         self.grid_layout.setSpacing(5)
         
-        # Create actuator controls in a 2x5 grid
+        # Calculate optimal grid layout: use 2-4 columns based on number of actuators
+        num_actuators = get_num_actuators()
+        if num_actuators <= 8:
+            cols = 2
+        elif num_actuators <= 16:
+            cols = 4
+        else:
+            cols = 4  # Default to 4 columns for larger numbers
+        
+        # Create actuator controls in dynamic grid
         self.actuator_widgets = []
-        for i in range(NUM_ACTUATORS):
+        for i in range(num_actuators):
             actuator_id = i + 1  # 1-indexed
             
-            # Calculate grid position: 2 columns, 5 rows
-            row = i // 2  # 0-4
-            col = i % 2   # 0 or 1
+            # Calculate grid position dynamically
+            row = i // cols
+            col = i % cols
             
             # Create widget for each actuator
             actuator_frame = QtWidgets.QFrame()
@@ -2188,7 +2220,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         # NO actuators start OPEN (GUI state 1, hardware command 0)
         # NC actuators start CLOSED (GUI state 0, hardware command 0)
         # Note: We only set UI state during initialization, no hardware commands are sent
-        for actuator_id in range(1, NUM_ACTUATORS + 1):
+        for actuator_id in range(1, get_num_actuators() + 1):
             actuator_type = self.actuator_types.get(actuator_id, 'NC')
             array_idx = actuator_id - 1
             if actuator_type == 'NO':
@@ -2239,7 +2271,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         When filtering is enabled, reflow visible actuators in order: row1 vents, row2 press, row3 mains; col1 fuel, col2 lox."""
         if self.only_show_actuators_with_roles:
             # Remove all widgets from grid
-            for i in range(NUM_ACTUATORS):
+            for i in range(get_num_actuators()):
                 widget = self.actuator_widgets[i]
                 self.grid_layout.removeWidget(widget['frame'])
             
@@ -2254,7 +2286,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                         visible_widgets.append(widget)
                         widget['frame'].setVisible(True)
             # Hide any actuator not in the ordered list
-            for i in range(NUM_ACTUATORS):
+            for i in range(get_num_actuators()):
                 widget = self.actuator_widgets[i]
                 if widget not in visible_widgets:
                     widget['frame'].setVisible(False)
@@ -2266,13 +2298,13 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                 self.grid_layout.addWidget(widget['frame'], row, col)
         else:
             # Show all actuators in their original positions
-            for i in range(NUM_ACTUATORS):
+            for i in range(get_num_actuators()):
                 actuator_id = i + 1
                 widget = self.actuator_widgets[i]
                 widget['frame'].setVisible(True)
             
             # Restore original grid positions
-            for i in range(NUM_ACTUATORS):
+            for i in range(get_num_actuators()):
                 widget = self.actuator_widgets[i]
                 self.grid_layout.removeWidget(widget['frame'])
                 row = i // 2
@@ -2298,7 +2330,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
                 
                 voltage = (code_int32 * 2.5) / 2147483648.0
                 array_idx = sensor_id - 1
-                if 0 <= array_idx < NUM_ACTUATORS:
+                if 0 <= array_idx < get_num_actuators():
                     self.voltage_readings[array_idx] = voltage
     
     def update_button_highlight(self, array_idx: int, actuator_state: int):
@@ -2415,7 +2447,7 @@ class ActuatorControlWidget(QtWidgets.QWidget):
     
     def update_current_display(self):
         """Update the voltage reading display for all actuators"""
-        for i in range(NUM_ACTUATORS):
+        for i in range(get_num_actuators()):
             voltage = self.voltage_readings[i]
             widget = self.actuator_widgets[i]
             widget['voltage_label'].setText(f"{voltage:.3f} V")
@@ -2465,7 +2497,7 @@ class PWMControlWindow(QtWidgets.QWidget):
         self.actuator_rows = {}  # id -> widgets dict
         
         # Create a row for each actuator
-        for i in range(NUM_ACTUATORS):
+        for i in range(get_num_actuators()):
             actuator_id = i + 1
             row_widget = QtWidgets.QGroupBox(f"Actuator {actuator_id}")
             row_layout = QtWidgets.QHBoxLayout(row_widget)
@@ -3539,7 +3571,7 @@ class SettingsWidget(QtWidgets.QWidget):
         for role_name in CONFIG.get_actuator_role_names():
             combo = QtWidgets.QComboBox()
             combo.addItem("—", 0)
-            for act_num in range(1, NUM_ACTUATORS + 1):
+            for act_num in range(1, get_num_actuators() + 1):
                 combo.addItem(str(act_num), act_num)
             combo.currentIndexChanged.connect(lambda idx, rn=role_name, c=combo: self.on_actuator_role_changed(rn, c))
             self.act_form.addRow(role_name + ":", combo)
@@ -4008,7 +4040,7 @@ class SettingsWidget(QtWidgets.QWidget):
             actuator_id = 0
         CONFIG.set_actuator_role(role_name, actuator_id)
         # Refresh widget labels from config
-        for aid in range(1, NUM_ACTUATORS + 1):
+        for aid in range(1, get_num_actuators() + 1):
             label = CONFIG.get_actuator_label(aid)
             self.actuator_widget.actuator_labels[aid] = label
             self.actuator_widget.update_label_display(aid, label)
@@ -4862,7 +4894,7 @@ class CombinedMainWindow(QtWidgets.QMainWindow):
         self.event_log: List[Tuple[float, str, str]] = []
         
         # Load state machine CSV
-        self.state_machine = load_state_machine_csv(CONFIG.get_state_machine_csv_path())
+        self.state_machine, _ = load_state_machine_csv(CONFIG.get_state_machine_csv_path())
         
         # Map mode button names to CSV state names (keep order in sync with CSV header and TopBarWidget)
         self.mode_to_state_map = {
