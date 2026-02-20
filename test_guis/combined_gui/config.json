@@ -33,7 +33,7 @@
         ],
         "LOX Press": [
             "NO",
-            9
+            8
         ],
         "GSE Low Vent": [
             "NC",
@@ -41,7 +41,7 @@
         ],
         "Fuel Fill Vent": [
             "NC",
-            8
+            9
         ],
         "Fuel Fill Press": [
             "NC",
@@ -51,9 +51,9 @@
     "sensor_roles": {
         "GSE Low": 2,
         "GSE Mid": 3,
-        "GN2 Regulated": 4,
+        "GN2 Regulated": 6,
         "Fuel Upstream": 1,
-        "Fuel Downstream": 6,
+        "Fuel Downstream": 4,
         "Ox Upstream": 5,
         "Ox Downstream": 7
     },
@@ -75,17 +75,17 @@
     "display": {
         "adc_bits": 32,
         "ref_voltage": 2.5,
-        "window_seconds": 42.0,
+        "window_seconds": 10.0,
         "y_axis_min": 0.0,
         "y_axis_max": 700.0,
         "y_axis_autoscale": true,
         "only_show_actuators_with_roles": true,
         "only_show_pt_with_roles": true,
-        "graph_ma_samples": 1,
-        "display_ma_samples": 1
+        "graph_ma_samples": 6,
+        "display_ma_samples": 6
     },
     "mappings": {
-        "GN2": 4,
+        "GN2": 6,
         "ETH": 1,
         "LOX": 5
     },
@@ -94,7 +94,7 @@
             "THRESH": 550,
             "NOP": 900,
             "MEOP": 950,
-            "POP": 981.0
+            "POP": 1000.0
         },
         "ETH": {
             "THRESH": 550.0,
@@ -113,11 +113,10 @@
     "num_actuators": 10,
     "paths": {
         "pt_calibration_csv": [
-            "pt_cali1.csv",
-            "pt_cali2.csv"
+            "calibration_20260219_160025.json"
         ],
         "state_machine_csv": "state_machine_actuators.csv",
         "state_transitions_csv": "state_transitions.csv"
     },
-    "simulate_chamber_pressure": false
+    "simulate_chamber_pressure": true
 }

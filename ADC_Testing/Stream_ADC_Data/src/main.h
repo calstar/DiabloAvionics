@@ -1,8 +1,8 @@
 #include "STAR_ADS126X.h"
 
-#define READINGS_PER_CONNECTOR 5  // Readings per connector per chunk (allows settling)
-#define FILTER ADS126X_SINC4
-#define DATA_RATE ADS126X_RATE_7200
+#define READINGS_PER_MUX 1
+#define FILTER ADS126X_SINC1
+#define DATA_RATE ADS126X_RATE_38400
 
 // ADC Reference Configuration
 // Selects which voltage the ADS126X uses as its reference for ADC conversions.
