@@ -1,9 +1,9 @@
 #include <iostream>
+#include "actuator_nc_config.h"
+
 static bool serverHeartbeat = true;
 static bool configPacket = true;
 int boardID = 1234; // Example board ID
-const int X = 5000; // Example time limit for connection loss handling
-static const int HEARTBEAT_TIMEOUT_MS = 5000; // 5 seconds timeout example
 static const std::string SERVER_ADDRESS = "SERVER_ADDRESS";
 static const std::string ACTUATOR_CONTROLLER_ADDRESS = "ACTUATOR_CONTROLLER_ADDRESS";
 const int IPAddress = 0; // Example IP address (recieve during packet config)
@@ -100,13 +100,13 @@ void setup(){
     //send heartbeats including board ID until it recieves server's heartbeat response or timeout
     while(serverHeartbeatReceived() == false){
         sendHeartbeat(boardID, myBoardState, SERVER_ADDRESS);
-        delay(100); // Wait 1 second before sending the next heartbeat
+        delay(HEARTBEAT_SEND_INTERVAL_MS);
     }
 
     storeAddress(); //store server address in server heartbeat
     //Waiting for Config
     while(configPacketReceived() == false){
-       delay(100);
+       delay(MAINLOOP_POLL_INTERVAL_MS);
     }
     
     //everything is set up, board is active
@@ -127,13 +127,14 @@ void mainloop(BoardState myBoardState, int boardID){ //ACTIVE STATE
 }
 
 void connectionLoss(BoardState myBoardState, int boardID){
+    (void)boardID;
     //handle connection loss
     myBoardState = BoardState::disconnected;
     int currentTime = 0;
-    while(currentTime < X){
+    while(currentTime < CONNECTION_LOSS_GRACE_MS){
         broadcastConnectionLoss(); //broadcast connection loss to server and actuator controller
         ping();
-        currentTime += 100; //example time increment
+        currentTime += MAINLOOP_POLL_INTERVAL_MS;
     }
     if(connectionResume() == true){
         mainloop(myBoardState, boardID); //resume mainloop if connection is resumed
@@ -155,7 +156,7 @@ void standardAbort(BoardState myBoardState, int boardID){
     
     while(true){
         sendHeartbeat(boardID, BoardState::abort, SERVER_ADDRESS); //send heartbeat to server with abort state
-        delay(100); //delay 100ms between heartbeats
+        delay(HEARTBEAT_SEND_INTERVAL_MS);
         if(abortDonePacketReceived() == true){
             abortFinish(myBoardState, boardID); //finish abort if abort done packet received from controller board
             break;
@@ -174,7 +175,7 @@ void noConnectionAbort(BoardState myBoardState, int boardID){
         
         while(abortDonePacketReceived() == false){
             executeCommands(); //execute commands from controller board as they come
-            delay(100);
+            delay(HEARTBEAT_SEND_INTERVAL_MS);
         }
         
         abortFinish(myBoardState, boardID); 

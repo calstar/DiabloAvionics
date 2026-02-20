@@ -1,9 +1,9 @@
 /**
- * PT (Pressure Transducer) Hotfire state machine — ESP32 PCB
+ * TC (Thermocouple) Hotfire state machine — ESP32 PCB
  *
- * Three states: Waiting for Server → Active → Standalone Abort (and back to Active on clear).
- * Sends heartbeats, streams sensor data to server or to actuator controller in abort.
- * Reference: Stream_ADC_Data for ADC and sensor streaming; actuator_c for state machine pattern.
+ * Same state machine as PT Hotfire: Waiting for Server → Active → Standalone Abort (and back to Active on clear).
+ * Sends heartbeats, streams thermocouple/sensor data to server or to actuator controller in abort.
+ * Uses TC_Board pin layout and BoardType::THERMOCOUPLE.
  */
 
 #include <Arduino.h>
@@ -16,16 +16,12 @@
 #include <vector>
 #include <esp_mac.h>
 
-// Same path as spiffs_write_byte.cpp: single byte burned to SPIFFS
-static const char* SPIFFS_BOARD_VALUE_PATH = "/value.bin";
-static const uint8_t BOARD_ID_DEFAULT = 1;
-
+#include "main.h"
+#define PINS_ACTIVE_LAYOUT sense_board_pins::TC_Board
 #include "STAR_ADS126X.h"
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 #include "adc_mappings.h"
-
-#define PINS_ACTIVE_LAYOUT sense_board_pins::PT_Board
 
 using namespace sense_board_pins;
 
@@ -37,7 +33,7 @@ using namespace sense_board_pins;
 #define TEST_PIN     1
 #define NUM_PTS     10
 #define READINGS_PER_MUX 5
-#define MAX_CHUNKS   10
+#define MAX_CHUNKS   9   // 9 chunks fit in 512-byte packet with 10 sensors
 
 static ADS126X ads126x;
 SPIClass ADC_SPI(HSPI);
@@ -83,6 +79,9 @@ static StoredSensorConfig stored_config = { false, false, 0 };
 std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 uint8_t sensorId = 0;
 
+// Heartbeat at fixed interval (main.h: BOARD_HEARTBEAT_INTERVAL_MS)
+static unsigned long lastHeartbeatMillis = 0;
+
 //-----------------------------------------------------------------------------
 // Incoming packet kinds (for transitions)
 //-----------------------------------------------------------------------------
@@ -90,9 +89,8 @@ enum class IncomingPacketKind {
   None,
   ServerHeartbeat,
   SensorConfig,
-  ClearAbort
-  // TODO: NoConnAbort packet type does not exist in DAQv2-Comms (submodule). When added,
-  // transition from Active to StandaloneAbort when NoConnAbort received AND necessary_for_abort.
+  ClearAbort,
+  NoConnAbort
 };
 
 //-----------------------------------------------------------------------------
@@ -156,9 +154,12 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
       return IncomingPacketKind::SensorConfig;
     case Diablo::PacketType::CLEAR_ABORT:
       return IncomingPacketKind::ClearAbort;
-    // TODO: When NoConnAbort packet type is added to DAQv2-Comms, add case here and
-    // return a new IncomingPacketKind::NoConnAbort so Active can transition to StandaloneAbort
-    // when necessary_for_abort is true.
+    case Diablo::PacketType::NO_CONNECTION_ABORT: {
+      Diablo::PacketHeader dummy;
+      if (Diablo::parse_no_connection_abort_packet(buffer, len, dummy))
+        return IncomingPacketKind::NoConnAbort;
+      return IncomingPacketKind::None;
+    }
     default:
       return IncomingPacketKind::None;
   }
@@ -169,12 +170,12 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
 //-----------------------------------------------------------------------------
 static void sendBoardHeartbeat(Diablo::BoardState board_state, IPAddress dest_ip, int dest_port) {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::PRESSURE_TRANSDUCER;
+  hb.board_type = Diablo::BoardType::THERMOCOUPLE;
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = board_state;
 
-  uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+  uint8_t packetBuffer[MAX_PACKET_SIZE];
   size_t n = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
   if (n == 0) return;
   udp.beginPacket(dest_ip, dest_port);
@@ -187,7 +188,7 @@ static void sendBoardHeartbeat(Diablo::BoardState board_state, IPAddress dest_ip
 //-----------------------------------------------------------------------------
 static void sendSensorDataPacketTo(IPAddress dest_ip, int dest_port) {
   if (dataChunks.empty()) return;
-  uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+  uint8_t packetBuffer[MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
     dataChunks, static_cast<uint8_t>(NUM_PTS), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
@@ -217,34 +218,28 @@ static void read_data(int count) {
 // State handlers
 //-----------------------------------------------------------------------------
 
-// 1: Waiting for Server — send heartbeats with boardState=setup; store server address from server heartbeat; on config -> Active
+// 1: Waiting for Server — heartbeat sent at fixed interval in loop; on config -> Active
 static void run_WaitingForServer() {
-  sendBoardHeartbeat(Diablo::BoardState::SETUP, serverIP, serverPort);
+  // No per-state work; heartbeat sent in loop
 }
 
-// 2: Active — heartbeats boardState=active; stream sensor packets to server; on NoConnAbort (TODO) + necessary_for_abort -> StandaloneAbort
+// 2: Active — stream sensor packets to server; heartbeat at fixed interval
 static void run_Active() {
-  sendBoardHeartbeat(Diablo::BoardState::ACTIVE, serverIP, serverPort);
   if (dataChunks.size() >= MAX_CHUNKS)
     sendSensorDataPacketTo(serverIP, serverPort);
-  // Transition to StandaloneAbort: TODO when NoConnAbort packet type exists and is received, and stored_config.necessary_for_abort
 }
 
-// 3: Standalone Abort — heartbeats boardState=abort; stream sensor data to actuator controller IP; on clear abort -> Active
+// 3: Standalone Abort — stream sensor data to actuator controller; heartbeat at fixed interval
 static void run_StandaloneAbort() {
-  if (!stored_config.valid || stored_config.actuator_controller_ip == 0) {
-    sendBoardHeartbeat(Diablo::BoardState::ABORT, serverIP, serverPort);
+  if (!stored_config.valid || stored_config.actuator_controller_ip == 0)
     return;
-  }
   IPAddress actuatorIP(
     (stored_config.actuator_controller_ip >> 24) & 0xFF,
     (stored_config.actuator_controller_ip >> 16) & 0xFF,
     (stored_config.actuator_controller_ip >> 8) & 0xFF,
     stored_config.actuator_controller_ip & 0xFF);
-  int actuatorPort = serverPortDefault;
-  sendBoardHeartbeat(Diablo::BoardState::ABORT, actuatorIP, actuatorPort);
   if (dataChunks.size() >= MAX_CHUNKS)
-    sendSensorDataPacketTo(actuatorIP, actuatorPort);
+    sendSensorDataPacketTo(actuatorIP, serverPortDefault);
 }
 
 //-----------------------------------------------------------------------------
@@ -258,9 +253,8 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case PTHotfireState::Active:
-      // TODO: NoConnAbort packet type does not exist in DAQv2-Comms (submodule). When added:
-      // if (kind == IncomingPacketKind::NoConnAbort && stored_config.necessary_for_abort)
-      //   state = PTHotfireState::StandaloneAbort;
+      if (kind == IncomingPacketKind::NoConnAbort && stored_config.necessary_for_abort)
+        state = PTHotfireState::StandaloneAbort;
       break;
     case PTHotfireState::StandaloneAbort:
       if (kind == IncomingPacketKind::ClearAbort) {
@@ -275,12 +269,12 @@ static void applyPacketTransition(IncomingPacketKind kind) {
 //-----------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("PT Hotfire state machine starting...");
+  Serial.println("TC Hotfire state machine starting...");
 
   bool spiffs_ok = false;
   // Mount read-only: do not format on fail, so we never overwrite burned value
   if (SPIFFS.begin(false)) {
-    File f = SPIFFS.open(SPIFFS_BOARD_VALUE_PATH, "r");
+    File f = SPIFFS.open(SPIFFS_BOARD_VALUE_PATH, "r");  // path from main.h
     if (f && f.available() >= 1) {
       uint8_t b;
       if (f.read(&b, 1) == 1) {
@@ -299,7 +293,7 @@ void setup() {
   if (!spiffs_ok)
     Serial.println("SPIFFS read skipped or failed, using default board ID 1 / 192.168.2.1");
 
-  ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI);
+  ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
   ADC_SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
 
@@ -316,17 +310,17 @@ void setup() {
 
   ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_ETH));
   SPI.begin(Pins.ETH_SCLK, Pins.ETH_MISO, Pins.ETH_MOSI);
-  delay(1000);
+  delay(ETHERNET_SPI_DELAY_MS);
   Ethernet.init(Pins.ETH_CS);
-  delay(1000);
+  delay(ETHERNET_INIT_DELAY_MS);
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
-  delay(1000);
+  delay(ETHERNET_BEGIN_DELAY_MS);
   udp.begin(udpListenPort);
 
   state = PTHotfireState::WaitingForServer;
   Serial.print("Ethernet IP: ");
   Serial.println(Ethernet.localIP());
-  Serial.println("Setup complete. State: WaitingForServer");
+  Serial.println("Setup complete. State: WaitingForServer (TC Board)");
 }
 
 //-----------------------------------------------------------------------------
@@ -337,7 +331,7 @@ void loop() {
   if (packetSize > 0) {
     IPAddress remoteIP = udp.remoteIP();
     int remotePort = udp.remotePort();
-    uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+    uint8_t packetBuffer[MAX_PACKET_SIZE];
     int bytesRead = udp.read(packetBuffer, sizeof(packetBuffer));
     if (bytesRead > 0) {
       IncomingPacketKind kind = processIncomingPacket(
@@ -367,5 +361,31 @@ void loop() {
       break;
   }
 
-  delay(10);
+  // Send board heartbeat at fixed interval (e.g. once per second)
+  unsigned long now = millis();
+  if (now - lastHeartbeatMillis >= BOARD_HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMillis = now;
+    switch (state) {
+      case PTHotfireState::WaitingForServer:
+        sendBoardHeartbeat(Diablo::BoardState::SETUP, serverIP, serverPort);
+        break;
+      case PTHotfireState::Active:
+        sendBoardHeartbeat(Diablo::BoardState::ACTIVE, serverIP, serverPort);
+        break;
+      case PTHotfireState::StandaloneAbort:
+        if (!stored_config.valid || stored_config.actuator_controller_ip == 0)
+          sendBoardHeartbeat(Diablo::BoardState::ABORT, serverIP, serverPort);
+        else {
+          IPAddress actuatorIP(
+            (stored_config.actuator_controller_ip >> 24) & 0xFF,
+            (stored_config.actuator_controller_ip >> 16) & 0xFF,
+            (stored_config.actuator_controller_ip >> 8) & 0xFF,
+            stored_config.actuator_controller_ip & 0xFF);
+          sendBoardHeartbeat(Diablo::BoardState::ABORT, actuatorIP, serverPortDefault);
+        }
+        break;
+    }
+  }
+
+  delay(LOOP_DELAY_MS);
 }

@@ -9,26 +9,21 @@
 #include "adc_mappings.h"
 #include "esp_mac.h"
 
-
-
 // Change the following line to automatically use the correct pins for the board being tested (PT_Board, LC_Board, RTD_Board, or TC_Board)
-#define PINS_ACTIVE_LAYOUT sense_board_pins::PT_Board
+#define PINS_ACTIVE_LAYOUT sense_board_pins::RTD_Board
 
 // These lines MUST be after the #define PINS_ACTIVE_LAYOUT or they will overwrite it with the default value!
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 
-// Connectors 1-10 on the sense board. Each chunk reads all connectors once.
-// Note: Single-ended testing only, referenced to AINCOM!
-// For PT/TC boards, using pin 1. For LC/RTD you may want to change this to 1 or 2.
-#define TEST_PIN 1
-#define NUM_CONNECTORS 10
-#define MAX_CHUNKS_PER_PACKET 9   // Accumulate this many chunks before sending (10 chunks + 10 sensors exceeds 512-byte packet limit)
+// RTD board: cycle connectors 1 and 2 only. Each connector is differential (pin 1 vs pin 2) with IDAC excitation.
+#define NUM_CONNECTORS 2
+#define MAX_CHUNKS_PER_PACKET 10
 
 using namespace sense_board_pins;
 
 // Ethernet configuration
-byte mac[6];  // Will be populated with unique MAC from ESP32 eFuse
+byte mac[6];
 IPAddress staticIP(192, 168, 2, 101);
 IPAddress gateway(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
@@ -44,77 +39,52 @@ SPIClass ADC_SPI(HSPI);
 void flush_adc_cycles(int cycles);
 void read_single_connector(uint8_t connector_id, int num_readings,
                           Diablo::SensorDataChunkCollection &chunk);
+void set_connector_rtd(uint8_t connector_id);
 void collect_chunk();
 void sendSensorDataPacket();
 
-// Each chunk = timestamp + datapoints from all connectors. Accumulate chunks before sending.
 std::vector<Diablo::SensorDataChunkCollection> chunks;
 
 float convert_code_to_voltage(int32_t code) {
-  // Assumes the 2.5V internal reference is being used! 
   return ((float)code * 2.5f) / 2147483648.0f;
 }
 
 void setup() {
   Serial.begin(115200);
-  // while (!Serial) {
-  //   delay(10);  // Wait for native USB serial to connect
-  // }
-
-  Serial.println("Starting ADC with Ethernet...");
-  
-  // Print reference configuration
-  #if USE_VDD_REFERENCE
-    Serial.println("ADC Reference: VDD");
-  #else
-    Serial.println("ADC Reference: Internal 2.5V");
-  #endif
+  Serial.println("Starting RTD streaming (connectors 1 & 2)...");
 
   // Setup ADC SPI
   ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
-
-  // You can set the freq if you want, or just use the default
-  // SPI.setFrequency(1'000'000);
-
-  // Due to the ADC output having valid data on FALLING CLK edges
   ADC_SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
 
-  // Setup ADC
   ads126x.begin(Pins.ADC_CS_1, &ADC_SPI);
-
-  // Stop it while we config it, as suggested by datasheet
   ads126x.stopADC1();
 
-  // Set initial input mux (will be updated per connector in each chunk)
-  ads126x.setInputMux(getAdcChannel(1, TEST_PIN), ADS126X_AINCOM);
-
-  // Set the reference voltage based on configuration in main.h
-  #if USE_VDD_REFERENCE
-    // Using VDD as reference (typically 3.3V or 5V depending on board)
-    ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
-  #else
-    // Using internal 2.5V reference (default if setReference is not called)
-    // No call to setReference() - ADC defaults to internal reference
-  #endif
-
-  // Bypas the PGA, so it does not affect measurements 
+  // Initial mux/IDAC will be set per connector in collect_chunk
+  ads126x.setInputMux(getAdcChannel(1, 1), getAdcChannel(1, 2));
   ads126x.bypassPGA();
-
-  // Set the filter. You can change this to try different filters
   ads126x.setFilter(FILTER);
-
-  // Set the datarate. You can change this, but the options depends on the filter
-  // I do not know what happens if you program an invalid data rate for a given filter
   ads126x.setRate(DATA_RATE);
 
-  // Start ADC now that configuration is done
+  {
+    const int idac1 = getIdacChannel(1, 1);
+    const int idac2 = getIdacChannel(1, 2);
+    if (idac1 >= 0) {
+      ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
+      ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
+    }
+    if (idac2 >= 0) {
+      ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
+      ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
+    }
+  }
+
   ads126x.startADC1();
 
-  // Generate unique MAC address from ESP32 eFuse (derived for Ethernet)
-  ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_ETH));   // Derived from base eFuse MAC
-
-  Serial.print("Generated unique MAC address: ");
+  // MAC from ESP32 eFuse
+  ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_ETH));
+  Serial.print("MAC: ");
   for (int i = 0; i < 6; i++) {
     if (i > 0) Serial.print(":");
     if (mac[i] < 0x10) Serial.print("0");
@@ -122,35 +92,18 @@ void setup() {
   }
   Serial.println();
 
-  // Setup Ethernet SPI
-  Serial.println("Initializing Ethernet...");
+  // Ethernet
   SPI.begin(Pins.ETH_SCLK, Pins.ETH_MISO, Pins.ETH_MOSI, Pins.ETH_CS);
   delay(1000);
-
-  // Initialize Ethernet with CS pin
   Ethernet.init(Pins.ETH_CS);
   delay(1000);
-
-  // Start Ethernet with static IP
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
   delay(1000);
-
-  // Start UDP
   udp.begin(5005);
 
-  // Print Ethernet status
-  Serial.print("Ethernet initialized. IP: ");
+  Serial.print("Ethernet OK, IP: ");
   Serial.println(Ethernet.localIP());
-  Serial.print("Link Status: ");
-  if (Ethernet.linkStatus() == LinkON) {
-    Serial.println("Connected");
-  } else if (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("Disconnected");
-  } else {
-    Serial.println("Unknown");
-  }
-
-  Serial.println("Setup complete!");
+  Serial.println("Setup complete.");
 }
 
 void loop() {
@@ -170,6 +123,20 @@ void flush_adc_cycles(int cycles) {
   }
 }
 
+void set_connector_rtd(uint8_t connector_id) {
+  ads126x.setInputMux(getAdcChannel(connector_id, 1), getAdcChannel(connector_id, 2));
+  const int idac1 = getIdacChannel(connector_id, 1);
+  const int idac2 = getIdacChannel(connector_id, 2);
+  if (idac1 >= 0) {
+    ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
+    ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
+  }
+  if (idac2 >= 0) {
+    ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
+    ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
+  }
+}
+
 void read_single_connector(uint8_t connector_id, int num_readings,
                           Diablo::SensorDataChunkCollection &chunk) {
   uint32_t value = 0;
@@ -186,17 +153,14 @@ void read_single_connector(uint8_t connector_id, int num_readings,
     value = static_cast<uint32_t>(reading.value);
   }
 
-  // Always add one datapoint per connector (packet format expects fixed count).
-  // Use 0 if no valid reading was obtained.
   chunk.add_datapoint(connector_id, value);
 }
 
 void collect_chunk() {
-  // One chunk = one timestamp with datapoints from all connectors
   Diablo::SensorDataChunkCollection chunk(millis(), NUM_CONNECTORS);
 
   for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
-    ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
+    set_connector_rtd(connector_id);
     flush_adc_cycles(settlePulses(FILTER));
     read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
   }
@@ -228,7 +192,7 @@ void sendSensorDataPacket() {
   udp.write(packetBuffer, packetSize);
   udp.endPacket();
 
-  Serial.print("Sent sensor data packet: ");
+  Serial.print("Sent RTD packet: ");
   Serial.print(packetSize);
   Serial.print(" bytes, ");
   Serial.print(chunks.size());

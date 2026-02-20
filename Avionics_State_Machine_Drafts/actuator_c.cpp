@@ -16,19 +16,9 @@
 #include <esp_mac.h>
 #include <vector>
 #include "actuator_board_pins.h"
-
-// Same path as spiffs_write_byte.cpp: single byte burned to SPIFFS
-static const char* SPIFFS_BOARD_VALUE_PATH = "/value.bin";
-static const uint8_t BOARD_ID_DEFAULT = 1;
+#include "actuator_config.h"
 
 using namespace actuator_board_pins;
-
-//-----------------------------------------------------------------------------
-// Timeouts (hardcoded)
-//-----------------------------------------------------------------------------
-static const unsigned long HEARTBEAT_TIMEOUT_MS = 5000;   // Server heartbeat watchdog
-static const unsigned long CONNECTION_LOSS_GRACE_MS = 10000;  // Time in Connection Loss to wait before No Connection Abort
-static const unsigned long NO_CONNECTION_ABORT_DONE_MS = 10000;  // After this in No Connection Abort -> Abort Finished
 
 //-----------------------------------------------------------------------------
 // Board identity and network (IP 192.168.2.XXX and board_id = XXX from SPIFFS)
@@ -70,19 +60,17 @@ static StoredConfig stored_config = { false, {0}, 0 };
 
 // Sensor data (like Actuator_Testing): current sense pins
 const uint8_t NUM_SENSORS = NUM_ACTUATORS;
-static const unsigned long ADC_READ_INTERVAL_MS = 100;
 static unsigned long last_adc_read_ms = 0;
 
 // Actuator output state (0 = OFF, 1 = ON), like Actuator_Testing
 static uint8_t actuator_states[NUM_ACTUATORS];
 
-//-----------------------------------------------------------------------------
-// Status LED: non-blocking blink count = state number, every 5 s
-//-----------------------------------------------------------------------------
-static const unsigned long LED_CYCLE_MS = 5000;
-static const unsigned long LED_BLINK_ON_MS = 100;
-static const unsigned long LED_BLINK_OFF_MS = 100;
+// Heartbeat at fixed interval (actuator_config.h: BOARD_HEARTBEAT_INTERVAL_MS)
+static unsigned long lastHeartbeatMillis = 0;
 
+//-----------------------------------------------------------------------------
+// Status LED: non-blocking blink count = state number (timing in actuator_config.h)
+//-----------------------------------------------------------------------------
 enum class LedPhase { Idle, On, Off };
 static LedPhase led_phase = LedPhase::Idle;
 static unsigned long led_cycle_start_ms = 0;
@@ -178,7 +166,7 @@ static void sendBoardHeartbeat() {
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = getBoardStateForHeartbeat();
 
-  uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+  uint8_t packetBuffer[MAX_PACKET_SIZE];
   size_t len = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
   if (len == 0) return;
 
@@ -281,7 +269,7 @@ static void readCurrentSensePinsAndSend() {
   }
   if (chunk.empty()) return;
 
-  uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+  uint8_t packetBuffer[MAX_PACKET_SIZE];
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
   size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, packetBuffer, sizeof(packetBuffer));
@@ -312,52 +300,43 @@ static void streamSensorDataIfDue() {
 // State handlers (each runs one tick, may transition)
 //-----------------------------------------------------------------------------
 
-// 1: Waiting for Server — send heartbeats with boardState=setup; on config -> Active
+// 1: Waiting for Server — heartbeat sent at fixed interval in loop; on config -> Active
 static void run_WaitingForServer() {
-  sendBoardHeartbeat();
   // Incoming packets processed in loop(); transition to Active happens when Config received
 }
 
-// 2: Active — heartbeats boardState=active, stream sensor data, watchdog -> Connection Loss, Abort packet -> Standard Abort
+// 2: Active — stream sensor data, watchdog -> Connection Loss; heartbeat at fixed interval
 static void run_Active() {
-  sendBoardHeartbeat();
   streamSensorDataIfDue();
   if (heartbeatTimedOut()) {
     state = ActuatorControllerState::ConnectionLossDetected;
     state_enter_ms = millis();
   }
-  // Abort / ConnectionLoss transitions are applied in loop() when packet is processed
 }
 
-// 3: Standard Abort — heartbeats boardState=abort; Abort Done packet -> Abort Finished; watchdog -> No Connection Abort
+// 3: Standard Abort — Abort Done packet -> Abort Finished; watchdog -> No Connection Abort; heartbeat at fixed interval
 static void run_StandardAbort() {
-  sendBoardHeartbeat();
   if (heartbeatTimedOut()) {
     state = ActuatorControllerState::NoConnectionAbort;
     state_enter_ms = millis();
   }
-  // AbortDone transition applied in loop()
 }
 
-// 4: No Connection Abort — heartbeats boardState=abort; complete abort sequence (TODO); after 10s -> Abort Finished
+// 4: No Connection Abort — complete abort sequence (TODO); after timeout -> Abort Finished; heartbeat at fixed interval
 static void run_NoConnectionAbort() {
-  sendBoardHeartbeat();
-  // TODO: Complete the abort sequence (will add later)
   if ((millis() - state_enter_ms) >= NO_CONNECTION_ABORT_DONE_MS) {
     state = ActuatorControllerState::AbortFinished;
     state_enter_ms = millis();
   }
 }
 
-// 5: Abort Finished — heartbeats boardState=abortDone; Clear Abort packet -> Active
+// 5: Abort Finished — Clear Abort packet -> Active; heartbeat at fixed interval
 static void run_AbortFinished() {
-  sendBoardHeartbeat();
   // ClearAbort transition applied in loop()
 }
 
 // 6: Connection Loss Detected — if server heartbeat received (in loop) -> Active; else after grace time -> No Connection Abort
 static void run_ConnectionLossDetected() {
-  // Heartbeat received is handled in applyPacketTransition(ServerHeartbeat) -> Active
   if ((millis() - state_enter_ms) >= CONNECTION_LOSS_GRACE_MS) {
     state = ActuatorControllerState::NoConnectionAbort;
     state_enter_ms = millis();
@@ -492,11 +471,11 @@ void setup() {
 
   Serial.println("Initializing Ethernet...");
   SPI.begin(Actuator_Board.ETH_SCLK, Actuator_Board.ETH_MISO, Actuator_Board.ETH_MOSI, Actuator_Board.ETH_CS);
-  delay(1000);
+  delay(ETHERNET_SPI_DELAY_MS);
   Ethernet.init(Actuator_Board.ETH_CS);
-  delay(1000);
+  delay(ETHERNET_INIT_DELAY_MS);
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
-  delay(1000);
+  delay(ETHERNET_BEGIN_DELAY_MS);
   udp.begin(udpListenPort);
 
   Serial.print("Ethernet initialized. IP: ");
@@ -525,7 +504,7 @@ void loop() {
   // 1) Read all pending UDP packets and update heartbeat time / apply transitions
   int packetSize = udp.parsePacket();
   if (packetSize > 0) {
-    uint8_t packetBuffer[Diablo::MAX_PACKET_SIZE];
+    uint8_t packetBuffer[MAX_PACKET_SIZE];
     int bytesRead = udp.read(packetBuffer, sizeof(packetBuffer));
     if (bytesRead > 0) {
       IncomingPacketKind kind = processIncomingPacket(packetBuffer, bytesRead);
@@ -555,5 +534,12 @@ void loop() {
       break;
   }
 
-  delay(10);
+  // Send board heartbeat at fixed interval (e.g. once per second)
+  unsigned long now = millis();
+  if (now - lastHeartbeatMillis >= BOARD_HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMillis = now;
+    sendBoardHeartbeat();
+  }
+
+  delay(LOOP_DELAY_MS);
 }

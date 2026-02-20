@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 from collections import deque
 
-# PT calibration CSV (relative to this file); used to show psi for PT connectors present in CSV
-PT_CALIBRATION_CSV = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # Go up to project root
-    "PT_Board", "Calibration", "PT Calibration Attempt 2026-02-04_test2.csv"
-)
+# Script directory (for resolving relative paths)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+# PT calibration CSV (default when no config paths); project root -> PT_Board/Calibration
+PT_CALIBRATION_CSV = str(_SCRIPT_DIR.parent.parent / "PT_Board" / "Calibration" / "PT Calibration Attempt 2026-02-04_test2.csv")
 
 # Fix Qt "cocoa" platform plugin on macOS when Homebrew Qt plugins path lacks platforms/
 if sys.platform == 'darwin':
@@ -65,6 +65,7 @@ class PacketType:
     ABORT_DONE = 8
     CLEAR_ABORT = 9
     PWM_ACTUATOR_COMMAND = 10
+    NO_CONNECTION_ABORT = 11
 
 # Default configuration
 DEFAULT_SENSOR_IP = '192.168.2.101'  # Sensor board IP address
@@ -116,8 +117,8 @@ DEFAULT_ACTUATOR_ABBREV_TO_ROLE = {
 }
 # When "only show actuators with roles" is true: display order in grid (row1 vents, row2 press, row3 mains; col1 fuel, col2 lox)
 ACTUATOR_DISPLAY_ORDER_WHEN_ROLES = ["Fuel Vent", "LOX Vent", "Fuel Press", "LOX Press", "Fuel Main", "LOX Main", "Fuel Fill"]
-ACTUATOR_LABELS_FILE = Path(__file__).parent / "actuator_labels.json"
-SENSOR_LABELS_FILE = Path(__file__).parent / "sensor_labels.json"
+ACTUATOR_LABELS_FILE = _SCRIPT_DIR / "actuator_labels.json"
+SENSOR_LABELS_FILE = _SCRIPT_DIR / "sensor_labels.json"
 
 # Colors for sensors (cycle through if more than this)
 SENSOR_COLORS = [
@@ -135,9 +136,9 @@ SENSOR_COLORS = [
 
 
 
-CONFIG_FILE = Path(__file__).parent / "config.json"
-_DEFAULT_STATE_MACHINE_CSV = Path(__file__).parent / "state_machine_actuators.csv"
-_DEFAULT_STATE_TRANSITIONS_CSV = Path(__file__).parent / "state_transitions.csv"
+CONFIG_FILE = _SCRIPT_DIR / "config.json"
+_DEFAULT_STATE_MACHINE_CSV = _SCRIPT_DIR / "state_machine_actuators.csv"
+_DEFAULT_STATE_TRANSITIONS_CSV = _SCRIPT_DIR / "state_transitions.csv"
 
 class ConfigManager:
     """Manages loading and saving of application configuration.
@@ -283,14 +284,16 @@ class ConfigManager:
     def get_pt_calibration_csv_paths(self):
         """Get list of PT calibration CSV paths from config.
         Returns list of paths (empty list means use default).
-        Supports both old format (single string) and new format (list)."""
+        Relative paths are resolved against the script directory."""
         p = (self.config.get("paths") or {}).get("pt_calibration_csv", "")
         if isinstance(p, list):
-            return [path.strip() for path in p if path and path.strip()]
+            raw = [path.strip() for path in p if path and path.strip()]
         elif isinstance(p, str):
-            return [p.strip()] if p.strip() else []
+            raw = [p.strip()] if p.strip() else []
         else:
-            return []
+            raw = []
+        # Resolve relative paths against script directory
+        return [str(_SCRIPT_DIR / path) if not os.path.isabs(path) else path for path in raw]
 
     def get_state_machine_csv_path(self):
         p = (self.config.get("paths") or {}).get("state_machine_csv", "").strip()
