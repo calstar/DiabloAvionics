@@ -223,6 +223,8 @@ enum class IncomingPacketKind {
   SensorData
 };
 
+static void processActuatorCommands(const std::vector<Diablo::ActuatorCommand> &commands);
+
 static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t len, IPAddress remoteIP) {
   Diablo::PacketHeader hdr;
   if (!readPacketHeader(buffer, len, hdr)) return IncomingPacketKind::None;
