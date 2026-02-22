@@ -57,8 +57,12 @@ namespace actuator_board_pins {
         15
     };
 
-    // Number of actuators
-    constexpr int NUM_ACTUATORS = 10;
+    // Maximum number of actuators supported by hardware (physical pin limit)
+    // Actual number of actuators in use should be determined dynamically from config/CSV at runtime
+    constexpr int MAX_ACTUATORS = 10;
+    // For backward compatibility, keep NUM_ACTUATORS as MAX_ACTUATORS
+    // But prefer using runtime config/CSV to determine actual count
+    constexpr int NUM_ACTUATORS = MAX_ACTUATORS;
 
     // Get actuator pin number by 1-indexed actuator ID
     // Returns the GPIO pin number for the given actuator (1-10)

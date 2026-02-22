@@ -23,10 +23,23 @@ LEADERBOARD_JSON = Path(__file__).resolve().parent / "sense_testing_leaderboard.
 # Fix Qt platform on macOS
 if sys.platform == 'darwin':
     import os
-    _qt = os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH')
-    if not _qt or not os.path.isdir(_qt):
-        for _p in ['/opt/homebrew/share/qt/plugins/platforms', '/usr/local/share/qt/plugins/platforms']:
-            if os.path.isdir(_p):
+    _qt_plugins = os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH')
+    if not _qt_plugins or not os.path.isdir(_qt_plugins):
+        _candidates = [
+            '/opt/homebrew/share/qt/plugins/platforms',
+            '/opt/homebrew/opt/qt/share/qt/plugins/platforms',
+            '/usr/local/share/qt/plugins/platforms',
+            '/usr/local/opt/qt/share/qt/plugins/platforms',
+            '/opt/homebrew/Cellar/qtbase/6.10.1/share/qt/plugins/platforms',
+        ]
+        if os.path.isdir('/opt/homebrew/Cellar/qtbase'):
+            for _name in sorted(os.listdir('/opt/homebrew/Cellar/qtbase'), reverse=True):
+                _p = os.path.join('/opt/homebrew/Cellar/qtbase', _name, 'share', 'qt', 'plugins', 'platforms')
+                if os.path.isdir(_p):
+                    _candidates.insert(1, _p)
+                    break
+        for _p in _candidates:
+            if os.path.isdir(_p) and any(_f.startswith('libqcocoa') for _f in os.listdir(_p)):
                 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = _p
                 break
 
@@ -44,6 +57,7 @@ PacketType = type('PacketType', (), {
     'BOARD_HEARTBEAT': 1,
     'SERVER_HEARTBEAT': 2,
     'SENSOR_DATA': 3,
+    'ACTUATOR_CONFIG': 6,
     'SENSOR_CONFIG': 5,
     'ABORT': 7,
     'CLEAR_ABORT': 9,
@@ -262,6 +276,25 @@ def build_sensor_config_packet(necessary_for_abort: bool, controller_ip: Optiona
 def build_header_only_packet(packet_type: int) -> bytes:
     """Abort, Clear Abort, No Connection Abort: header only."""
     return _make_header(packet_type)
+
+
+def build_actuator_config_packet_from_file(filepath: str) -> Optional[bytes]:
+    """Build ACTUATOR_CONFIG packet from binary file (body only). File format: is_abort_controller(1), N(1), N*7 bytes, X(1), X*6 bytes. IPs big-endian."""
+    try:
+        with open(filepath, 'rb') as f:
+            body = f.read()
+    except OSError:
+        return None
+    if len(body) < 3:  # at least is_abort_controller, N, X (when N=0, X at index 2)
+        return None
+    n = body[1]
+    if 2 + n * 7 + 1 > len(body):  # need byte for X at index 2 + n*7
+        return None
+    x = body[2 + n * 7]
+    expected = 2 + n * 7 + 1 + x * 6
+    if len(body) < expected:
+        return None
+    return _make_header(PacketType.ACTUATOR_CONFIG) + body
 
 
 class UDPReceiver(QtCore.QThread):
@@ -560,6 +593,12 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.send_heartbeat_cb.stateChanged.connect(self._on_send_heartbeat_changed)
         cmd_layout.addWidget(self.send_heartbeat_cb)
 
+        self.simulate_no_conn_abort_cb = QtWidgets.QCheckBox("Simulate NoConnAbort")
+        self.simulate_no_conn_abort_cb.setToolTip(
+            "When checked: stop sending server heartbeats (board will see connection loss) while still receiving and displaying board state."
+        )
+        cmd_layout.addWidget(self.simulate_no_conn_abort_cb)
+
         target_row = QtWidgets.QHBoxLayout()
         target_row.addWidget(QtWidgets.QLabel("Target IP:"))
         self.target_ip_edit = QtWidgets.QLineEdit()
@@ -595,6 +634,24 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.send_sensor_config_btn.clicked.connect(self._send_sensor_config)
         sens_layout.addWidget(self.send_sensor_config_btn)
         cmd_layout.addWidget(sens_grp)
+
+        # Actuator config
+        act_cfg_grp = QtWidgets.QGroupBox("Actuator config packet")
+        act_cfg_layout = QtWidgets.QVBoxLayout(act_cfg_grp)
+        act_cfg_row = QtWidgets.QHBoxLayout()
+        act_cfg_row.addWidget(QtWidgets.QLabel("Config file:"))
+        self.actuator_config_path_edit = QtWidgets.QLineEdit()
+        self.actuator_config_path_edit.setPlaceholderText("Path to binary actuator config (body only)")
+        act_cfg_row.addWidget(self.actuator_config_path_edit)
+        self.actuator_config_browse_btn = QtWidgets.QPushButton("Browse")
+        self.actuator_config_browse_btn.clicked.connect(self._browse_actuator_config)
+        act_cfg_row.addWidget(self.actuator_config_browse_btn)
+        act_cfg_layout.addLayout(act_cfg_row)
+        self.send_actuator_config_btn = QtWidgets.QPushButton("Send actuator config")
+        self.send_actuator_config_btn.setToolTip("Sends to Target IP and port. File format: is_abort_controller(1), N(1), N×7 bytes, X(1), X×6 bytes; IPs big-endian.")
+        self.send_actuator_config_btn.clicked.connect(self._send_actuator_config)
+        act_cfg_layout.addWidget(self.send_actuator_config_btn)
+        cmd_layout.addWidget(act_cfg_grp)
 
         # Abort buttons
         abort_grp = QtWidgets.QGroupBox("Abort packets")
@@ -785,6 +842,8 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self._server_heartbeat_timer.stop()
 
     def _send_server_heartbeat_once(self):
+        if self.simulate_no_conn_abort_cb.isChecked():
+            return  # Simulate NoConnAbort: stop sending heartbeats but keep receiving
         ip = self.target_ip_edit.text().strip()
         if not ip:
             self.send_status_label.setText("Send status: No target IP")
@@ -809,6 +868,31 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self._send_sock.sendto(pkt, (ip, port))
         except Exception:
             pass
+
+    def _browse_actuator_config(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select actuator config file", "", "Binary (*.bin);;All files (*)")
+        if path:
+            self.actuator_config_path_edit.setText(path)
+
+    def _send_actuator_config(self):
+        ip = self.target_ip_edit.text().strip()
+        if not ip:
+            self.send_status_label.setText("Send status: No target IP")
+            return
+        path = self.actuator_config_path_edit.text().strip()
+        if not path:
+            self.send_status_label.setText("Send status: No actuator config file path")
+            return
+        pkt = build_actuator_config_packet_from_file(path)
+        if pkt is None:
+            self.send_status_label.setText("Send status: Failed to read or validate actuator config file")
+            return
+        try:
+            port = self.target_port_spin.value()
+            self._send_sock.sendto(pkt, (ip, port))
+            self.send_status_label.setText(f"Send status: Actuator config sent to {ip}:{port}")
+        except Exception as e:
+            self.send_status_label.setText(f"Send status: Error — {e}")
 
     def _send_header_only(self, packet_type: int):
         ip = self.target_ip_edit.text().strip()

@@ -163,15 +163,20 @@ bool parse_pwm_actuator_packet(const uint8_t *buffer, size_t buffer_size,
                                std::vector<PWMActuatorCommand> &commands_out);
 
 /**
- * @brief Creates a complete Actuator Abort Configuration packet in the provided buffer.
- * 
- * Packet layout: PacketHeader + ActuatorConfigPacket + AbortActuatorLocations + AbortPTLocations.
- * Locations and purposes are hardcoded config.
- *
- * @param buffer The output buffer to write the packet into.
- * @param buffer_size The size of the provided buffer.
- * @return The total size of the created packet, or 0 on error.
+ * @brief Parses an Actuator Config packet from buffer.
+ * Body layout: is_abort_controller(1), num_abort_actuators(1), N x AbortActuatorLocation(7 each), num_abort_pts(1), X x AbortPTLocation(6 each).
+ * @param buffer Full packet (header + body).
+ * @param buffer_size Total buffer size.
+ * @param header_out Filled with packet header.
+ * @param is_abort_controller_out Filled with is_abort_controller byte.
+ * @param actuator_locations_out Filled with up to NUM_ABORT_ACTUATOR_LOCATIONS entries.
+ * @param pt_locations_out Filled with up to NUM_ABORT_PT_LOCATIONS entries.
+ * @return true on success, false on size/type mismatch.
  */
-size_t create_actuator_abort_packet(uint8_t *buffer, size_t buffer_size);
+bool parse_actuator_config_packet(const uint8_t *buffer, size_t buffer_size,
+                                PacketHeader &header_out,
+                                uint8_t &is_abort_controller_out,
+                                std::vector<AbortActuatorLocation> &actuator_locations_out,
+                                std::vector<AbortPTLocation> &pt_locations_out);
 
 } // namespace Diablo

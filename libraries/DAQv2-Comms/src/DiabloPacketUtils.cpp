@@ -371,4 +371,52 @@ bool parse_pwm_actuator_packet(const uint8_t *buffer, size_t buffer_size,
   return true;
 }
 
+bool parse_actuator_config_packet(const uint8_t *buffer, size_t buffer_size,
+                                  PacketHeader &header_out,
+                                  uint8_t &is_abort_controller_out,
+                                  std::vector<AbortActuatorLocation> &actuator_locations_out,
+                                  std::vector<AbortPTLocation> &pt_locations_out) {
+  const size_t header_size = sizeof(PacketHeader);
+  if (!buffer || buffer_size < header_size + 2) return false;  // at least header + is_abort_controller + N
+
+  PacketHeader hdr;
+  memcpy(&hdr, buffer, header_size);
+  if (hdr.packet_type != PacketType::ACTUATOR_CONFIG) return false;
+
+  const uint8_t *ptr = buffer + header_size;
+  is_abort_controller_out = ptr[0];
+  const uint8_t N = ptr[1];
+  ptr += 2;
+
+  const size_t actuator_block = static_cast<size_t>(N) * sizeof(AbortActuatorLocation);
+  if (buffer_size < header_size + 2 + actuator_block + 1) return false;  // need at least num_abort_pts
+
+  actuator_locations_out.clear();
+  actuator_locations_out.reserve(N);
+  for (uint8_t i = 0; i < N && actuator_locations_out.size() < NUM_ABORT_ACTUATOR_LOCATIONS; i++) {
+    AbortActuatorLocation loc;
+    memcpy(&loc, ptr, sizeof(AbortActuatorLocation));
+    actuator_locations_out.push_back(loc);
+    ptr += sizeof(AbortActuatorLocation);
+  }
+  ptr = buffer + header_size + 2 + actuator_block;  // in case N was larger than MAX we skipped some
+  const uint8_t X = *ptr;
+  ptr += 1;
+
+  const size_t pt_block = static_cast<size_t>(X) * sizeof(AbortPTLocation);
+  if (buffer_size < header_size + 2 + actuator_block + 1 + pt_block) return false;
+
+  pt_locations_out.clear();
+  pt_locations_out.reserve(X);
+  for (uint8_t i = 0; i < X && pt_locations_out.size() < NUM_ABORT_PT_LOCATIONS; i++) {
+    AbortPTLocation loc;
+    memcpy(&loc, ptr, sizeof(AbortPTLocation));
+    pt_locations_out.push_back(loc);
+    ptr += sizeof(AbortPTLocation);
+  }
+
+  header_out = hdr;
+  return true;
+}
+
 } // namespace Diablo
