@@ -161,7 +161,7 @@ void collect_chunk() {
 
   for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
     set_connector_rtd(connector_id);
-    flush_adc_cycles(settlePulses(FILTER));
+    flush_adc_cycles(settlePulses(FILTER, DATA_RATE));
     read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
   }
 

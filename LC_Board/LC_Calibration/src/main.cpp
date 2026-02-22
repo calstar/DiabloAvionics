@@ -25,7 +25,8 @@ SPIClass ADC_SPI(HSPI);   // ADC on HSPI, Ethernet on default SPI (VSPI)
 // LC Board ADC1 connectors: 1, 2, 3, 6, 7
 const uint8_t ADC1_CONNECTORS[] = {1, 2, 3, 6, 7};
 const uint8_t NUM_LC_SENSORS = sizeof(ADC1_CONNECTORS) / sizeof(ADC1_CONNECTORS[0]);
-#define FILTER ADS126X_SINC4
+#define FILTER    ADS126X_SINC4
+#define DATA_RATE ADS126X_RATE_1200
 
 // ---------------------------------------------------------------------------
 // Ethernet
@@ -83,7 +84,7 @@ void setup()
   ads126x.setFilter(FILTER);
 
   // Set the datarate. You can change this, but the options depends on the filter
-  ads126x.setRate(ADS126X_RATE_1200);
+  ads126x.setRate(DATA_RATE);
 
   // Start ADC now that configuration is done
   ads126x.startADC1();
@@ -135,7 +136,7 @@ void loop()
       ads126x.setInputMux(pos_channel, neg_channel);
       
       // Flush cycles to let mux settle after change
-      flush_cycles(settlePulses(FILTER));
+      flush_cycles(settlePulses(FILTER, DATA_RATE));
       
       // Wait for DRDY pin - exactly like LC_Simple_Test
       while (digitalRead(Pins.ADC_DRDY_1) != LOW)

@@ -187,7 +187,7 @@ void collect_chunk() {
   Diablo::SensorDataChunkCollection chunk(millis(), NUM_CONNECTORS);
   for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
     ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
-    flush_adc_cycles(settlePulses(FILTER));
+    flush_adc_cycles(settlePulses(FILTER, DATA_RATE));
     read_single_connector(connector_id, READINGS_PER_MUX, chunk);
   }
   if (chunk.size() == NUM_CONNECTORS)

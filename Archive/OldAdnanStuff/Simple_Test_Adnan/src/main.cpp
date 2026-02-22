@@ -17,7 +17,8 @@
 #include "adc_config.h"
 
 // Configuration constants
-#define FILTER ADS126X_SINC4
+#define FILTER    ADS126X_SINC4
+#define DATA_RATE ADS126X_RATE_7200
 // READINGS_PER_MUX is defined in adc_config.h
 
 using namespace sense_board_pins;
@@ -62,7 +63,7 @@ void setup() {
   ads126x.setFilter(FILTER);
 
   // Set the datarate. You can change this, but the options depends on the filter
-  ads126x.setRate(ADS126X_RATE_7200);
+  ads126x.setRate(DATA_RATE);
 
   // Set the reference
   ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
@@ -81,7 +82,7 @@ void loop() {
   // Set initial mux for first connector and let it settle
   uint8_t nextChannel = getAdcChannel(1, TEST_PIN);
   ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
-  flush_cycles(settlePulses(FILTER));
+  flush_cycles(settlePulses(FILTER, DATA_RATE));
   
   // Collect 83 samples to fill the buffer
   // Structure: 83 samples × 3 channels × READINGS_PER_MUX readings per channel
@@ -101,7 +102,7 @@ void loop() {
       ads126x.setInputMux(nextChannel, ADS126X_AINCOM);
       
       // Flush cycles to let mux settle (discards unsettled data)
-      flush_cycles(settlePulses(FILTER));
+      flush_cycles(settlePulses(FILTER, DATA_RATE));
     }
   }
   

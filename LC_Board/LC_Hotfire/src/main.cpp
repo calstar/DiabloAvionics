@@ -257,7 +257,7 @@ static void collect_chunk() {
     const int ch2 = getAdcChannel(connector_id, 2);
     if (ch1 < 0 || ch2 < 0) continue;
     ads126x.setInputMux(static_cast<uint8_t>(ch1), static_cast<uint8_t>(ch2));
-    flush_cycles(settlePulses(FILTER));
+    flush_cycles(settlePulses(FILTER, DATA_RATE));
     uint32_t value = 0u;
     for (int r = 0; r < READINGS_PER_CONNECTOR; r++) {
       while (digitalRead(Pins.ADC_DRDY_1) != LOW)

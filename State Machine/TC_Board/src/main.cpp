@@ -347,7 +347,7 @@ void loop() {
   int ch = getAdcChannel(currentConnector, TEST_PIN);
   if (ch >= 0)
     ads126x.setInputMux(static_cast<uint8_t>(ch), ADS126X_AINCOM);
-  flush_cycles(settlePulses(FILTER));
+  flush_cycles(settlePulses(FILTER, DATA_RATE));
 
   switch (state) {
     case PTHotfireState::WaitingForServer:

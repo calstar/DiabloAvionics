@@ -15,14 +15,15 @@ constexpr uint8_t baseSettlePulses(uint8_t f)
     }
 }
 
-constexpr uint8_t settlePulses(uint8_t f,
+constexpr uint8_t settlePulses(uint8_t filter, uint8_t data_rate,
                                bool chop_enabled = false,
                                bool idac_rotation_enabled = false)
 {
-    uint8_t n = baseSettlePulses(f);
+    if (data_rate == ADS126X_RATE_38400)
+        return 5;
 
-    // Either one being enabled double conversion time
-    // It seems unlikely that either will be used, but shrug 
+    uint8_t n = baseSettlePulses(filter);
+
     if (chop_enabled)          n *= 2;
     if (idac_rotation_enabled) n *= 2;
 

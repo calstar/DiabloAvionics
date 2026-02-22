@@ -30,6 +30,7 @@ using namespace sense_board_pins;
 // ADC config (from Simple_Test_Adnan style)
 // ---------------------------------------------------------------------------
 #define FILTER       ADS126X_SINC4
+#define DATA_RATE    ADS126X_RATE_7200
 #define TEST_PIN     1
 #define NUM_PTS      10   // Connectors 1–10 on PT board
 
@@ -100,7 +101,7 @@ void setup() {
 
   ads126x.bypassPGA();
   ads126x.setFilter(FILTER);
-  ads126x.setRate(ADS126X_RATE_7200);
+  ads126x.setRate(DATA_RATE);
   ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
 
   ads126x.startADC1();
@@ -138,7 +139,7 @@ void loop() {
     float v = 0.0f;
     if (ch >= 0) {
       ads126x.setInputMux(static_cast<uint8_t>(ch), ADS126X_AINCOM);
-      flush_cycles(settlePulses(FILTER));
+      flush_cycles(settlePulses(FILTER, DATA_RATE));
       int32_t raw;
       if (read_one(raw, v))
         { /* use v */ }
