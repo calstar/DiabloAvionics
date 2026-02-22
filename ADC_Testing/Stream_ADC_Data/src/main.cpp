@@ -18,18 +18,17 @@
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 
-// Connectors 1-10 on the sense board. Each chunk reads all connectors once.
-// Note: Single-ended testing only, referenced to AINCOM!
-// For PT/TC boards, using pin 1. For LC/RTD you may want to change this to 1 or 2.
+// Connectors 1-10 on the sense board. Each chunk = one full scan (all connectors).
+// Packet format expects num_sensors datapoints per chunk; max 9 chunks fits in 512 bytes.
 #define TEST_PIN 1
 #define NUM_CONNECTORS 10
-#define MAX_CHUNKS_PER_PACKET 9   // Accumulate this many chunks before sending (10 chunks + 10 sensors exceeds 512-byte packet limit)
+#define MAX_CHUNKS_BEFORE_SEND 9
 
 using namespace sense_board_pins;
 
 // Ethernet configuration
 byte mac[6];  // Will be populated with unique MAC from ESP32 eFuse
-IPAddress staticIP(192, 168, 2, 101);
+IPAddress staticIP(192, 168, 2, 102);
 IPAddress gateway(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
@@ -47,7 +46,7 @@ void read_single_connector(uint8_t connector_id, int num_readings,
 void collect_chunk();
 void sendSensorDataPacket();
 
-// Each chunk = timestamp + datapoints from all connectors. Accumulate chunks before sending.
+// One chunk = full scan (10 datapoints). Accumulate up to MAX_CHUNKS_BEFORE_SEND.
 std::vector<Diablo::SensorDataChunkCollection> chunks;
 
 float convert_code_to_voltage(int32_t code) {
@@ -156,7 +155,7 @@ void setup() {
 void loop() {
   collect_chunk();
 
-  if (chunks.size() >= MAX_CHUNKS_PER_PACKET) {
+  if (chunks.size() >= MAX_CHUNKS_BEFORE_SEND) {
     sendSensorDataPacket();
     chunks.clear();
   }
@@ -164,46 +163,35 @@ void loop() {
 
 void flush_adc_cycles(int cycles) {
   for (int i = 0; i < cycles; i++) {
-    while (digitalRead(Pins.ADC_DRDY_1) != LOW) {
+    while (digitalRead(Pins.ADC_DRDY_1) != LOW)
       delayMicroseconds(10);
-    }
+    ads126x.readADC1();
   }
 }
 
 void read_single_connector(uint8_t connector_id, int num_readings,
                           Diablo::SensorDataChunkCollection &chunk) {
   uint32_t value = 0;
-
   for (int i = 0; i < num_readings; i++) {
-    while (digitalRead(Pins.ADC_DRDY_1) != LOW) {
+    while (digitalRead(Pins.ADC_DRDY_1) != LOW)
       delayMicroseconds(10);
-    }
     const auto reading = ads126x.readADC1();
-    if (!reading.checksumValid) {
-      Serial.println("Warning: Bad checksum");
-      continue;
-    }
+    if (!reading.checksumValid) continue;
     value = static_cast<uint32_t>(reading.value);
   }
-
-  // Always add one datapoint per connector (packet format expects fixed count).
-  // Use 0 if no valid reading was obtained.
   chunk.add_datapoint(connector_id, value);
 }
 
+// One chunk = full scan of all 10 connectors (packet format expects num_sensors per chunk)
 void collect_chunk() {
-  // One chunk = one timestamp with datapoints from all connectors
   Diablo::SensorDataChunkCollection chunk(millis(), NUM_CONNECTORS);
-
   for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
     ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
     flush_adc_cycles(settlePulses(FILTER));
-    read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
+    read_single_connector(connector_id, READINGS_PER_MUX, chunk);
   }
-
-  if (!chunk.empty()) {
+  if (chunk.size() == NUM_CONNECTORS)
     chunks.push_back(chunk);
-  }
 }
 
 void sendSensorDataPacket() {
