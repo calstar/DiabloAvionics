@@ -67,7 +67,7 @@
         "FF": "Fuel Fill"
     },
     "network": {
-        "actuator_ip": "192.168.2.201",
+        "actuator_ip": "192.168.2.202",
         "actuator_port": 5005,
         "sensor_ip_filter": "192.168.2.101",
         "receive_port": 5006

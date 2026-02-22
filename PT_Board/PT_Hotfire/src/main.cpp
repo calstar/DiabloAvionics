@@ -34,11 +34,10 @@ using namespace sense_board_pins;
 #define TEST_PIN     1
 #define NUM_PTS     10
 #define READINGS_PER_MUX 5
-#define MAX_CHUNKS   10
+#define MAX_CHUNKS_BEFORE_SEND 9  // 9 chunks fits in 512-byte packet
 
 static ADS126X ads126x;
 SPIClass ADC_SPI(HSPI);
-static uint8_t currentConnector = 1;
 
 //-----------------------------------------------------------------------------
 // Ethernet and network (IP 192.168.2.XXX and board_id = XXX from SPIFFS)
@@ -76,12 +75,20 @@ struct StoredSensorConfig {
 };
 static StoredSensorConfig stored_config = { false, false, 0 };
 
-// Sensor data collection (Stream_ADC_Data style)
+// Sensor data collection: each chunk = full scan of all channels (Stream_ADC_Data style)
 std::vector<Diablo::SensorDataChunkCollection> dataChunks;
-uint8_t sensorId = 0;
 
 // Heartbeat at fixed interval (main.h: BOARD_HEARTBEAT_INTERVAL_MS)
 static unsigned long lastHeartbeatMillis = 0;
+
+// State LED: blink N times per cycle, N = state number (1=WaitingForServer, 2=Active, 3=StandaloneAbort)
+#define STATE_LED_CYCLE_MS  2500
+#define BLINK_ON_MS          120
+#define BLINK_OFF_MS         120
+static unsigned long last_led_cycle_millis = 0;
+static unsigned long last_led_edge_millis = 0;
+static int led_blink_index = 0;
+static bool led_on = false;
 
 //-----------------------------------------------------------------------------
 // Incoming packet kinds (for transitions)
@@ -199,19 +206,28 @@ static void sendSensorDataPacketTo(IPAddress dest_ip, int dest_port) {
   dataChunks.clear();
 }
 
-//-----------------------------------------------------------------------------
-// Read ADC data for current connector and push chunk (Stream_ADC_Data style)
-//-----------------------------------------------------------------------------
-static void read_data(int count) {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_PTS);
-  for (int i = 0; i < count; i++) {
+static void read_single_connector(uint8_t connector_id, int num_readings,
+                                  Diablo::SensorDataChunkCollection &chunk) {
+  uint32_t value = 0;
+  for (int i = 0; i < num_readings; i++) {
     while (digitalRead(Pins.ADC_DRDY_1) != LOW)
       delayMicroseconds(10);
     const auto reading = ads126x.readADC1();
     if (!reading.checksumValid) continue;
-    chunk.add_datapoint(sensorId, static_cast<uint32_t>(reading.value));
+    value = static_cast<uint32_t>(reading.value);
   }
-  if (!chunk.empty())
+  chunk.add_datapoint(connector_id, value);
+}
+
+// One chunk = full scan of all channels (Stream_ADC_Data style)
+static void collect_chunk() {
+  Diablo::SensorDataChunkCollection chunk(millis(), NUM_PTS);
+  for (uint8_t connector_id = 1; connector_id <= NUM_PTS; connector_id++) {
+    ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
+    flush_cycles(settlePulses(FILTER));
+    read_single_connector(connector_id, READINGS_PER_MUX, chunk);
+  }
+  if (chunk.size() == NUM_PTS && dataChunks.size() < MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -226,7 +242,7 @@ static void run_WaitingForServer() {
 
 // 2: Active — stream sensor packets to server; heartbeat at fixed interval
 static void run_Active() {
-  if (dataChunks.size() >= MAX_CHUNKS)
+  if (dataChunks.size() >= MAX_CHUNKS_BEFORE_SEND)
     sendSensorDataPacketTo(serverIP, serverPort);
 }
 
@@ -239,8 +255,44 @@ static void run_StandaloneAbort() {
     (stored_config.actuator_controller_ip >> 16) & 0xFF,
     (stored_config.actuator_controller_ip >> 8) & 0xFF,
     stored_config.actuator_controller_ip & 0xFF);
-  if (dataChunks.size() >= MAX_CHUNKS)
+  if (dataChunks.size() >= MAX_CHUNKS_BEFORE_SEND)
     sendSensorDataPacketTo(actuatorIP, serverPortDefault);
+}
+
+//-----------------------------------------------------------------------------
+// State LED: periodically blink N times where N = current state number (non-blocking)
+//-----------------------------------------------------------------------------
+static void update_state_led(int state_num) {
+  if (state_num < 1) state_num = 1;
+  if (state_num > 3) state_num = 3;
+  unsigned long now = millis();
+
+  if (now - last_led_cycle_millis >= STATE_LED_CYCLE_MS) {
+    last_led_cycle_millis = now;
+    last_led_edge_millis = now;
+    led_blink_index = 0;
+    led_on = true;
+    digitalWrite(Pins.LED, HIGH);
+    return;
+  }
+
+  if (led_blink_index >= state_num)
+    return;
+
+  if (led_on) {
+    if (now - last_led_edge_millis >= (unsigned long)BLINK_ON_MS) {
+      digitalWrite(Pins.LED, LOW);
+      led_on = false;
+      led_blink_index++;
+      last_led_edge_millis = now;
+    }
+  } else {
+    if (now - last_led_edge_millis >= (unsigned long)BLINK_OFF_MS) {
+      digitalWrite(Pins.LED, HIGH);
+      led_on = true;
+      last_led_edge_millis = now;
+    }
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -294,6 +346,9 @@ void setup() {
   if (!spiffs_ok)
     Serial.println("SPIFFS read skipped or failed, using default board ID 1 / 192.168.2.1");
 
+  pinMode(Pins.LED, OUTPUT);
+  digitalWrite(Pins.LED, LOW);
+
   ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI);
   ADC_SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
@@ -306,8 +361,6 @@ void setup() {
   ads126x.setRate(DATA_RATE);
   ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
   ads126x.startADC1();
-
-  sensorId = currentConnector;
 
   ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_ETH));
   SPI.begin(Pins.ETH_SCLK, Pins.ETH_MISO, Pins.ETH_MOSI);
@@ -341,14 +394,8 @@ void loop() {
     }
   }
 
-  read_data(READINGS_PER_MUX);
-  currentConnector++;
-  if (currentConnector > NUM_PTS) currentConnector = 1;
-  sensorId = currentConnector;
-  int ch = getAdcChannel(currentConnector, TEST_PIN);
-  if (ch >= 0)
-    ads126x.setInputMux(static_cast<uint8_t>(ch), ADS126X_AINCOM);
-  flush_cycles(settlePulses(FILTER));
+  if (state == PTHotfireState::Active || state == PTHotfireState::StandaloneAbort)
+    collect_chunk();
 
   switch (state) {
     case PTHotfireState::WaitingForServer:
@@ -361,6 +408,9 @@ void loop() {
       run_StandaloneAbort();
       break;
   }
+
+  int state_num = (state == PTHotfireState::WaitingForServer) ? 1 : (state == PTHotfireState::Active) ? 2 : 3;
+  update_state_led(state_num);
 
   // Send board heartbeat at fixed interval (e.g. once per second)
   unsigned long now = millis();

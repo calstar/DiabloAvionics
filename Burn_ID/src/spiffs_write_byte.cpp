@@ -16,7 +16,7 @@ void setup() {
   while (!Serial) {
     delay(10);
   }
-  delay(500);
+  delay(2000);
 
   if (!SPIFFS.begin(true)) {
     Serial.println("SPIFFS mount failed");

@@ -9,6 +9,7 @@ Receives BOARD_HEARTBEAT and SENSOR_DATA UDP packets from DAQv2-Comms boards.
 Requirements: pip install pyqt6 pyqtgraph numpy
 """
 
+import json
 import socket
 import struct
 import sys
@@ -16,6 +17,8 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
+
+LEADERBOARD_JSON = Path(__file__).resolve().parent / "sense_testing_leaderboard.json"
 
 # Fix Qt platform on macOS
 if sys.platform == 'darwin':
@@ -205,26 +208,33 @@ def pt1000_voltage_to_temperature_c(v_volts: float, excitation_ua: float = 1000.
     return None
 
 
-def voltage_to_force(
-    v_volts: float,
+# 32-bit signed ADC full-scale magnitude (codes)
+ADC32_FULL_SCALE = 2147483648.0
+
+
+def code_to_force(
+    code_uint32: int,
+    adc_ref_voltage: float,
     excitation_voltage: float,
     sensitivity_mv_per_v: float,
     pga_gain: float,
     full_scale_force: float,
 ) -> Optional[float]:
     """
-    Convert load-cell ADC voltage to force.
-    V is the voltage at the ADC (after PGA on the board). Bridge voltage = V / pga_gain.
-    Full-scale bridge output = excitation_voltage * (sensitivity_mv_per_v / 1000).
-    Force = (bridge_voltage / full_scale_bridge_voltage) * full_scale_force.
+    Ratiometric load-cell force from raw 32-bit ADC code (no voltage conversion).
+    Assumes 32-bit signed ADC: code / 2^31 = (V_ADC_input / V_ref).
+    At full-scale force: V_bridge_fs = excitation * (sensitivity_mV_V / 1000),
+    V_ADC_fs = V_bridge_fs * pga_gain, so code_fs = (V_ADC_fs / V_ref) * 2^31.
+    Force = (code / code_fs) * full_scale_force.
     """
-    if pga_gain <= 0 or excitation_voltage <= 0 or sensitivity_mv_per_v <= 0:
+    if adc_ref_voltage <= 0 or pga_gain <= 0 or excitation_voltage <= 0 or sensitivity_mv_per_v <= 0:
         return None
-    v_bridge = v_volts / pga_gain
-    v_fs_bridge = excitation_voltage * (sensitivity_mv_per_v / 1000.0)
-    if v_fs_bridge <= 0:
+    code_int32 = struct.unpack("i", struct.pack("I", code_uint32))[0]
+    # code_fs = (V_exc * sens/1000 * pga_gain / V_ref) * 2^31
+    code_fs = (excitation_voltage * (sensitivity_mv_per_v / 1000.0) * pga_gain / adc_ref_voltage) * ADC32_FULL_SCALE
+    if code_fs <= 0:
         return None
-    proportion = v_bridge / v_fs_bridge
+    proportion = code_int32 / code_fs
     return proportion * full_scale_force
 
 
@@ -357,6 +367,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.channel_checkboxes: Dict[int, QtWidgets.QCheckBox] = {}
         self.network_stats = {'packets': '0', 'pps': '0.0', 'bytes': '0 B', 'bps': '0.0 B/s'}
         self.window_seconds = DEFAULT_WINDOW_SECONDS
+        self.force_leaderboard: List[Tuple[str, float]] = []  # (name, force) sorted by force desc
 
         # Board status (heartbeats)
         self.heartbeat_timestamps: deque = deque(maxlen=HEARTBEAT_RATE_WINDOW)
@@ -426,7 +437,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
 
         toolbar.addSpacing(20)
         self.show_force_lc_cb = QtWidgets.QCheckBox("Show force (load cell)")
-        self.show_force_lc_cb.setToolTip("Convert voltage to force using excitation, sensitivity (mV/V), PGA gain, and full scale force.")
+        self.show_force_lc_cb.setToolTip("Ratiometric: force from raw 32-bit ADC code (no voltage step). Uses Reference voltage (V) as ADC ref, plus excitation, sensitivity (mV/V), PGA gain, full scale force.")
         self.show_force_lc_cb.stateChanged.connect(self._on_show_force_lc_changed)
         toolbar.addWidget(self.show_force_lc_cb)
 
@@ -600,9 +611,42 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         cmd_layout.addWidget(abort_grp)
 
         cmd_layout.addStretch()
-        content.addWidget(cmd_panel)
 
+        # Right column: Server & commands + compact leaderboard below
+        right_column = QtWidgets.QWidget()
+        right_column.setMinimumWidth(260)
+        right_column_layout = QtWidgets.QVBoxLayout(right_column)
+        right_column_layout.setContentsMargins(0, 0, 0, 0)
+        right_column_layout.addWidget(cmd_panel)
+
+        leaderboard_grp = QtWidgets.QGroupBox("Max force")
+        leaderboard_grp.setStyleSheet("QGroupBox { font-size: 10px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px 2px 4px; }")
+        leaderboard_grp.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        leaderboard_layout = QtWidgets.QVBoxLayout(leaderboard_grp)
+        leaderboard_layout.setContentsMargins(6, 4, 6, 4)
+        leaderboard_layout.setSpacing(2)
+        leaderboard_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        lb_row = QtWidgets.QHBoxLayout()
+        self.leaderboard_name_edit = QtWidgets.QLineEdit()
+        self.leaderboard_name_edit.setPlaceholderText("Name")
+        self.leaderboard_name_edit.setMaxLength(40)
+        self.leaderboard_name_edit.setMaximumWidth(88)
+        lb_row.addWidget(self.leaderboard_name_edit)
+        self.leaderboard_add_btn = QtWidgets.QPushButton("Add max")
+        self.leaderboard_add_btn.setToolTip("Add max force in current time window to leaderboard.")
+        self.leaderboard_add_btn.clicked.connect(self._on_add_max_force_to_leaderboard)
+        lb_row.addWidget(self.leaderboard_add_btn)
+        leaderboard_layout.addLayout(lb_row)
+        self.leaderboard_list = QtWidgets.QListWidget()
+        self.leaderboard_list.setMaximumHeight(56)
+        self.leaderboard_list.setFont(QtGui.QFont(None, 9))
+        leaderboard_layout.addWidget(self.leaderboard_list)
+        right_column_layout.addWidget(leaderboard_grp)
+        right_column_layout.addStretch()
+
+        content.addWidget(right_column)
         layout.addLayout(content)
+        self._load_leaderboard()
 
         # Stats bar
         self.stats_label = QtWidgets.QLabel("Packets: 0  |  Pkts/s: 0  |  Bytes: 0  |  B/s: 0")
@@ -654,6 +698,63 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
                 self.show_temp_k_cb.setChecked(False)
             if self.show_temp_pt1000_cb.isChecked():
                 self.show_temp_pt1000_cb.setChecked(False)
+
+    def _on_add_max_force_to_leaderboard(self):
+        """Find max force in current time window and add (name, force) to leaderboard."""
+        if self.stats_start_time is None:
+            self.status_label.setText("No data yet — start receiving to add to leaderboard.")
+            return
+        current_time = time.time() - self.stats_start_time
+        time_window = self.window_seconds
+        exc = self.lc_excitation_spin.value()
+        sens = self.lc_sensitivity_spin.value()
+        pga = self.lc_pga_gain_spin.value()
+        fs = self.lc_full_scale_spin.value()
+        ref_v = self.ref_voltage
+        max_force: Optional[float] = None
+        for sid, dq in self.sensor_data.items():
+            if not self.plot_enabled.get(sid, True):
+                continue
+            for t, code in dq:
+                if current_time - t <= time_window:
+                    f = code_to_force(code, ref_v, exc, sens, pga, fs)
+                    if f is not None and (max_force is None or f > max_force):
+                        max_force = f
+        if max_force is None:
+            self.status_label.setText("No valid force in current window (check Show force & data).")
+            return
+        name = self.leaderboard_name_edit.text().strip() or "Anonymous"
+        self.force_leaderboard.append((name, max_force))
+        self.force_leaderboard.sort(key=lambda x: x[1], reverse=True)
+        self._refresh_leaderboard_list()
+        self._save_leaderboard()
+        self.status_label.setText(f"Added: {name} — {max_force:.2f}")
+
+    def _load_leaderboard(self):
+        """Load leaderboard from JSON file (persisted between sessions)."""
+        try:
+            if LEADERBOARD_JSON.exists():
+                with open(LEADERBOARD_JSON, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.force_leaderboard = [(e["name"], float(e["force"])) for e in data]
+                self.force_leaderboard.sort(key=lambda x: x[1], reverse=True)
+                self._refresh_leaderboard_list()
+        except Exception:
+            pass
+
+    def _save_leaderboard(self):
+        """Save leaderboard to JSON file."""
+        try:
+            data = [{"name": n, "force": f} for n, f in self.force_leaderboard]
+            with open(LEADERBOARD_JSON, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _refresh_leaderboard_list(self):
+        self.leaderboard_list.clear()
+        for i, (name, force) in enumerate(self.force_leaderboard, 1):
+            self.leaderboard_list.addItem(f"{i}. {name}: {force:.2f}")
 
     def _on_channel_toggled(self, channel: int, state):
         from PyQt6.QtCore import Qt
@@ -730,7 +831,6 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             for dp in chunk['datapoints']:
                 sensor_id = dp['sensor_id']
                 code_uint32 = dp['data']
-                voltage = code_to_voltage(code_uint32, self.ref_voltage)
 
                 if sensor_id not in self.sensor_data:
                     self.sensor_data[sensor_id] = deque(maxlen=MAX_POINTS)
@@ -744,7 +844,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
                     plot.setVisible(self.plot_enabled.get(sensor_id, True))
                     self.sensor_plots[sensor_id] = plot
 
-                self.sensor_data[sensor_id].append((receive_time, voltage))
+                self.sensor_data[sensor_id].append((receive_time, code_uint32))
 
     def _update_plots(self):
         if not self._started or not self.receiver:
@@ -810,8 +910,9 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             for sid, dq in self.sensor_data.items():
                 if not self.plot_enabled.get(sid, True):
                     continue
-                for t, v in dq:
+                for t, code in dq:
                     if current_time - t <= time_window:
+                        v = code_to_voltage(code, self.ref_voltage)
                         max_abs_v = max(max_abs_v, abs(v))
             if max_abs_v < 1e-6:
                 y_unit, y_scale = "µV", 1e6
@@ -833,28 +934,33 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
                 continue
             self.sensor_plots[sensor_id].setVisible(True)
             times, values = [], []
-            for t, v in data_deque:
+            for t, code in data_deque:
                 if current_time - t <= time_window:
                     if use_force:
                         exc = self.lc_excitation_spin.value()
                         sens = self.lc_sensitivity_spin.value()
                         pga = self.lc_pga_gain_spin.value()
                         fs = self.lc_full_scale_spin.value()
-                        force = voltage_to_force(v, exc, sens, pga, fs)
+                        force = code_to_force(
+                            code, self.ref_voltage, exc, sens, pga, fs
+                        )
                         if force is not None:
                             times.append(t)
                             values.append(force)
                     elif use_pt1000:
+                        v = code_to_voltage(code, self.ref_voltage)
                         temp = pt1000_voltage_to_temperature_c(v, excitation_ua=PT1000_EXCITATION_UA)
                         if temp is not None:
                             times.append(t)
                             values.append(temp)
                     elif use_k_type:
+                        v = code_to_voltage(code, self.ref_voltage)
                         temp = k_type_voltage_to_temperature_c(v)
                         if temp is not None:
                             times.append(t)
                             values.append(temp)
                     else:
+                        v = code_to_voltage(code, self.ref_voltage)
                         times.append(t)
                         values.append(v * y_scale)
             if times:
@@ -866,6 +972,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self.plot_widget.setXRange(0, time_window, padding=0)
 
     def closeEvent(self, event):
+        self._save_leaderboard()
         self._server_heartbeat_timer.stop()
         if self._send_sock:
             try:

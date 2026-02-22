@@ -83,6 +83,15 @@ std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 // Heartbeat at fixed interval (main.h: BOARD_HEARTBEAT_INTERVAL_MS)
 static unsigned long lastHeartbeatMillis = 0;
 
+// State LED: blink N times per cycle, N = state number (1=WaitingForServer, 2=Active, 3=StandaloneAbort)
+#define STATE_LED_CYCLE_MS  2500
+#define BLINK_ON_MS          120
+#define BLINK_OFF_MS         120
+static unsigned long last_led_cycle_millis = 0;
+static unsigned long last_led_edge_millis = 0;
+static int led_blink_index = 0;
+static bool led_on = false;
+
 //-----------------------------------------------------------------------------
 // Incoming packet kinds (for transitions)
 //-----------------------------------------------------------------------------
@@ -306,6 +315,42 @@ static void run_StandaloneAbort() {
 }
 
 //-----------------------------------------------------------------------------
+// State LED: periodically blink N times where N = current state number (non-blocking)
+//-----------------------------------------------------------------------------
+static void update_state_led(int state_num) {
+  if (state_num < 1) state_num = 1;
+  if (state_num > 3) state_num = 3;
+  unsigned long now = millis();
+
+  if (now - last_led_cycle_millis >= STATE_LED_CYCLE_MS) {
+    last_led_cycle_millis = now;
+    last_led_edge_millis = now;
+    led_blink_index = 0;
+    led_on = true;
+    digitalWrite(Pins.LED, HIGH);
+    return;
+  }
+
+  if (led_blink_index >= state_num)
+    return;
+
+  if (led_on) {
+    if (now - last_led_edge_millis >= (unsigned long)BLINK_ON_MS) {
+      digitalWrite(Pins.LED, LOW);
+      led_on = false;
+      led_blink_index++;
+      last_led_edge_millis = now;
+    }
+  } else {
+    if (now - last_led_edge_millis >= (unsigned long)BLINK_OFF_MS) {
+      digitalWrite(Pins.LED, HIGH);
+      led_on = true;
+      last_led_edge_millis = now;
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------
 // Apply packet-driven transitions
 //-----------------------------------------------------------------------------
 static void applyPacketTransition(IncomingPacketKind kind) {
@@ -356,6 +401,9 @@ void setup() {
   }
   if (!spiffs_ok)
     Serial.println("SPIFFS read skipped or failed, using default board ID 1 / 192.168.2.1");
+
+  pinMode(Pins.LED, OUTPUT);
+  digitalWrite(Pins.LED, LOW);
 
   ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
   ADC_SPI.setDataMode(SPI_MODE1);
@@ -430,6 +478,9 @@ void loop() {
       run_StandaloneAbort();
       break;
   }
+
+  int state_num = (state == LCHotfireState::WaitingForServer) ? 1 : (state == LCHotfireState::Active) ? 2 : 3;
+  update_state_led(state_num);
 
   // Send board heartbeat at fixed interval (e.g. once per second)
   unsigned long now = millis();
