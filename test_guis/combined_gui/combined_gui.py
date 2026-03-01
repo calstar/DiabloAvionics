@@ -1548,7 +1548,8 @@ class SensorPlotWidget(QtWidgets.QWidget):
             if source_ip != "127.0.0.1":
                 return  # In demo mode only accept packets from local demo sender
         else:
-            if source_ip != self.filter_source_ip:
+            # If filter is empty string, accept from any source (useful in WSL/NAT where source IP is rewritten)
+            if self.filter_source_ip and source_ip != self.filter_source_ip:
                 return  # Ignore data from other sources
         
         current_time = time.time()
@@ -2857,13 +2858,58 @@ class TopBarWidget(QtWidgets.QWidget):
     mode_changed = QtCore.pyqtSignal(str)  # Mode name string
     debug_toggled = QtCore.pyqtSignal(bool)  # DEBUG mode enabled/disabled
 
+    # Countdown target: Friday March 6, 2026 12:00:00 PST (UTC-8)
+    _COUNTDOWN_TARGET_UTC = QtCore.QDateTime(
+        QtCore.QDate(2026, 3, 6), QtCore.QTime(20, 0, 0), QtCore.Qt.TimeSpec.UTC
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(150)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setSpacing(0)
-        
+
+        # ── Clock & Countdown (top-left, before pressure bars) ──────────────
+        clock_col = QtWidgets.QVBoxLayout()
+        clock_col.setSpacing(2)
+        clock_col.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+        self.lbl_time = QtWidgets.QLabel()
+        self.lbl_time.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.lbl_time.setStyleSheet(
+            "font-size: 14pt; font-weight: bold; color: #e0e0e0; font-family: monospace;"
+        )
+
+        self.lbl_countdown = QtWidgets.QLabel()
+        self.lbl_countdown.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.lbl_countdown.setStyleSheet(
+            "font-size: 11pt; font-weight: bold; color: #ffd700; font-family: monospace;"
+        )
+
+        lbl_countdown_title = QtWidgets.QLabel("T- LAUNCH")
+        lbl_countdown_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lbl_countdown_title.setStyleSheet(
+            "font-size: 7pt; color: #aaaaaa; letter-spacing: 1px;"
+        )
+
+        clock_col.addStretch()
+        clock_col.addWidget(self.lbl_time)
+        clock_col.addWidget(lbl_countdown_title)
+        clock_col.addWidget(self.lbl_countdown)
+        clock_col.addStretch()
+
+        layout.addLayout(clock_col)
+        layout.addSpacing(8)
+
+        # Tick immediately, then every second
+        self._update_clock()
+        self._clock_timer = QtCore.QTimer(self)
+        self._clock_timer.setInterval(1000)
+        self._clock_timer.timeout.connect(self._update_clock)
+        self._clock_timer.start()
+        # ────────────────────────────────────────────────────────────────────
+
         # Pressure Bars: bottom=0, shared scale_max so THRESH/NOP/MEOP/POP align across bars
         pl = CONFIG.config.get("pressure_limits", {})
         def limits(fluid: str):
@@ -3135,6 +3181,26 @@ class TopBarWidget(QtWidgets.QWidget):
         self._update_current_state_display()
         
         layout.addLayout(btn_layout)
+
+    def _update_clock(self):
+        """Update the current-time label and the countdown-to-launch label."""
+        now_utc = QtCore.QDateTime.currentDateTimeUtc()
+        # Current time display in local time
+        now_local = QtCore.QDateTime.currentDateTime()
+        self.lbl_time.setText(now_local.toString("HH:mm:ss"))
+        # Countdown
+        remaining_ms = now_utc.msecsTo(self._COUNTDOWN_TARGET_UTC)
+        if remaining_ms <= 0:
+            self.lbl_countdown.setText("00:00:00")
+            self.lbl_countdown.setStyleSheet(
+                "font-size: 11pt; font-weight: bold; color: #ff4444; font-family: monospace;"
+            )
+        else:
+            total_secs = remaining_ms // 1000
+            hours = total_secs // 3600
+            minutes = (total_secs % 3600) // 60
+            seconds = total_secs % 60
+            self.lbl_countdown.setText(f"{hours:03d}:{minutes:02d}:{seconds:02d}")
 
     def _update_global_line_ys(self):
         """Compute bar rect once from first bar; set same y20,y40,y60,y80 (parent coords) on all three bars."""
