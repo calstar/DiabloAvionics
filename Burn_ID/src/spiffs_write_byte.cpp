@@ -8,6 +8,7 @@
 
 static const char* FILE_PATH = "/value.bin";
 static const uint8_t VALUE_TO_WRITE = 31;  // change as needed
+bool success;
 
 void setup() {
   Serial.begin(115200);
@@ -16,7 +17,7 @@ void setup() {
   while (!Serial) {
     delay(10);
   }
-  delay(2000);
+  delay(500);
 
   if (!SPIFFS.begin(true)) {
     Serial.println("SPIFFS mount failed");
@@ -54,11 +55,19 @@ void setup() {
 
   if (n == 1 && readBack == VALUE_TO_WRITE) {
     Serial.printf("Read-back OK: %s contains %u\n", FILE_PATH, (unsigned)readBack);
+    success = true;
   } else {
     Serial.printf("Read-back FAIL: got %u (expected %u)\n", (unsigned)readBack, (unsigned)VALUE_TO_WRITE);
+    success = false;
   }
 }
 
 void loop() {
-  // one-shot: nothing to do
+  if (success)  {
+    Serial.printf("Burn in succeeded: ID %u\n", (unsigned)VALUE_TO_WRITE);
+  }
+  else {
+    Serial.println("Burn in failed");
+  }
+  delay(500);
 }

@@ -263,13 +263,21 @@ def build_server_heartbeat_packet() -> bytes:
     return _make_header(PacketType.SERVER_HEARTBEAT) + struct.pack('<B', 0)
 
 
-def build_sensor_config_packet(necessary_for_abort: bool, controller_ip: Optional[str]) -> bytes:
-    """Sensor config: header + necessary_for_abort (1) + optional controller_ip (4 bytes big-endian). PT Hotfire expects body at offset 6."""
-    pkt = _make_header(PacketType.SENSOR_CONFIG) + struct.pack('<B', 1 if necessary_for_abort else 0)
+def build_sensor_config_packet(
+    necessary_for_abort: bool,
+    controller_ip: Optional[str],
+    reference_voltage: int = 0,
+    enable_serial_printing: int = 0,
+) -> bytes:
+    """Sensor config: header(6) + reference_voltage(1) + necessary_for_abort(1) + optional controller_ip (4B BE) + enable_serial_printing(1).
+    reference_voltage: 0 = internal 2.5V, 1 = VDD. enable_serial_printing: 1 = enable, 0 = disable (DAQv2-Comms field).
+    """
+    pkt = _make_header(PacketType.SENSOR_CONFIG) + struct.pack('<B', reference_voltage & 0xFF) + struct.pack('<B', 1 if necessary_for_abort else 0)
     if necessary_for_abort and controller_ip:
         parts = [int(x) for x in controller_ip.strip().split('.')]
         if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
             pkt += struct.pack('>I', (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
+    pkt += struct.pack('<B', 1 if enable_serial_printing else 0)
     return pkt
 
 
@@ -625,6 +633,9 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         sens_layout = QtWidgets.QVBoxLayout(sens_grp)
         self.necessary_for_abort_cb = QtWidgets.QCheckBox("Necessary for abort")
         sens_layout.addWidget(self.necessary_for_abort_cb)
+        self.enable_serial_printing_cb = QtWidgets.QCheckBox("Enable serial printing on board")
+        self.enable_serial_printing_cb.setToolTip("If checked, sensor config packet tells the board to enable Serial output (DAQv2-Comms field).")
+        sens_layout.addWidget(self.enable_serial_printing_cb)
         sens_layout.addWidget(QtWidgets.QLabel("Actuator controller IP:"))
         self.actuator_ip_edit = QtWidgets.QLineEdit()
         self.actuator_ip_edit.setPlaceholderText("192.168.2.20")
@@ -864,7 +875,10 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             port = self.target_port_spin.value()
             necessary = self.necessary_for_abort_cb.isChecked()
             controller_ip = self.actuator_ip_edit.text().strip() or None
-            pkt = build_sensor_config_packet(necessary, controller_ip)
+            # 0 = internal 2.5V, 1 = VDD (e.g. 3.3V)
+            ref_enum = 0 if self.ref_voltage <= 2.5 else 1
+            enable_serial = 1 if self.enable_serial_printing_cb.isChecked() else 0
+            pkt = build_sensor_config_packet(necessary, controller_ip, reference_voltage=ref_enum, enable_serial_printing=enable_serial)
             self._send_sock.sendto(pkt, (ip, port))
         except Exception:
             pass

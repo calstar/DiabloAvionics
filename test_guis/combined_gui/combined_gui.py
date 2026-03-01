@@ -2316,22 +2316,46 @@ class ActuatorControlWidget(QtWidgets.QWidget):
         pass
     
     def on_sensor_data(self, header: dict, chunks: List[dict], source_ip: str):
-        """Handle received sensor data (voltage readings)"""
-        if chunks:
-            latest_chunk = chunks[-1]
-            for dp in latest_chunk['datapoints']:
-                sensor_id = dp['sensor_id']  # 1-indexed (1-10)
-                code_uint32 = dp['data']  # Received as uint32_t from protocol
-                
-                if code_uint32 >= 0x80000000:
-                    code_int32 = code_uint32 - 0x100000000
+        """Handle received sensor data (actuator current-sense voltage readings)."""
+        if not chunks:
+            return
+
+        # Only accept sensor packets from the actuator board
+        if self.device_ip and source_ip != self.device_ip:
+            return
+
+        latest_chunk = chunks[-1]
+        for dp in latest_chunk['datapoints']:
+            sensor_id_packet = int(dp.get('sensor_id', -1))
+            data_u32 = int(dp.get('data', 0))
+
+            # Actuator_Testing firmware uses 1-indexed IDs (1..10); still accept legacy 0..9.
+            if 1 <= sensor_id_packet <= get_num_actuators():
+                actuator_id = sensor_id_packet
+            elif 0 <= sensor_id_packet < get_num_actuators():
+                actuator_id = sensor_id_packet + 1
+            else:
+                continue
+
+            array_idx = actuator_id - 1
+            if not (0 <= array_idx < get_num_actuators()):
+                continue
+
+            # Actuator_Testing sends voltage as float bits (IEEE754) in the uint32 field.
+            # For compatibility with raw ADC-code senders, fall back if decoded float is implausible.
+            try:
+                voltage = struct.unpack('<f', struct.pack('<I', data_u32 & 0xFFFFFFFF))[0]
+                if not (math.isfinite(voltage) and -1.0 <= voltage <= 10.0):
+                    raise ValueError("implausible float")
+            except Exception:
+                # Interpret as signed ADC code and scale to volts (legacy behavior)
+                if data_u32 >= 0x80000000:
+                    code_int32 = data_u32 - 0x100000000
                 else:
-                    code_int32 = code_uint32
-                
+                    code_int32 = data_u32
                 voltage = (code_int32 * 2.5) / 2147483648.0
-                array_idx = sensor_id - 1
-                if 0 <= array_idx < get_num_actuators():
-                    self.voltage_readings[array_idx] = voltage
+
+            self.voltage_readings[array_idx] = float(voltage)
     
     def update_button_highlight(self, array_idx: int, actuator_state: int):
         """Update button highlighting based on actuator state. Selected OPEN = saturated green, selected CLOSED = saturated red."""

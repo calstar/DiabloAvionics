@@ -50,8 +50,8 @@ namespace actuator_board_pins {
         4, 6, 14, 21, 35, 5, 7, 21, 48, 36,
 
         // CURRENT_SENSE_1 through CURRENT_SENSE_10
-        // 18, 9, 13, 11, 1, 17, 8, 10, 12, 2
-        8, 17, 12, 11, 2, 9, 18, 11, 13, 1,
+        // Hardware mapping: 1→18, 2→9, 3→13, 4→11, 5→1, 6→17, 7→8, 8→10, 9→12, 10→2
+        18, 9, 13, 11, 1, 17, 8, 10, 12, 2,
 
         // LED
         15
@@ -82,21 +82,21 @@ namespace actuator_board_pins {
         }
     }
 
-    // Get current sense pin number by 0-indexed sensor ID (0-9)
+    // Get current sense pin number by 1-indexed actuator ID (1-10)
     // Returns the GPIO pin number for the given current sense pin
-    inline int getCurrentSensePin(uint8_t sensor_id) {
-        switch(sensor_id) {
-            case 0: return Actuator_Board.CURRENT_SENSE_1;
-            case 1: return Actuator_Board.CURRENT_SENSE_2;
-            case 2: return Actuator_Board.CURRENT_SENSE_3;
-            case 3: return Actuator_Board.CURRENT_SENSE_4;
-            case 4: return Actuator_Board.CURRENT_SENSE_5;
-            case 5: return Actuator_Board.CURRENT_SENSE_6;
-            case 6: return Actuator_Board.CURRENT_SENSE_7;
-            case 7: return Actuator_Board.CURRENT_SENSE_8;
-            case 8: return Actuator_Board.CURRENT_SENSE_9;
-            case 9: return Actuator_Board.CURRENT_SENSE_10;
-            default: return -1; // Invalid sensor ID
+    inline int getCurrentSensePin(uint8_t actuator_id) {
+        switch(actuator_id) {
+            case 1: return Actuator_Board.CURRENT_SENSE_1;
+            case 2: return Actuator_Board.CURRENT_SENSE_2;
+            case 3: return Actuator_Board.CURRENT_SENSE_3;
+            case 4: return Actuator_Board.CURRENT_SENSE_4;
+            case 5: return Actuator_Board.CURRENT_SENSE_5;
+            case 6: return Actuator_Board.CURRENT_SENSE_6;
+            case 7: return Actuator_Board.CURRENT_SENSE_7;
+            case 8: return Actuator_Board.CURRENT_SENSE_8;
+            case 9: return Actuator_Board.CURRENT_SENSE_9;
+            case 10: return Actuator_Board.CURRENT_SENSE_10;
+            default: return -1; // Invalid actuator ID
         }
     }
 }

@@ -356,11 +356,11 @@ void readCurrentSensePins() {
   Diablo::SensorDataChunkCollection chunk(millis(), NUM_SENSORS);
   
   // Read all current sense pins
-  for (uint8_t sensor_id = 0; sensor_id < NUM_SENSORS; sensor_id++) {
-    int pin = getCurrentSensePin(sensor_id);
+  for (uint8_t actuator_id = 1; actuator_id <= NUM_SENSORS; actuator_id++) {
+    int pin = getCurrentSensePin(actuator_id);
     if (pin < 0) {
-      Serial.print("Warning: Invalid current sense sensor ID: ");
-      Serial.println(sensor_id);
+      Serial.print("Warning: Invalid current sense actuator ID: ");
+      Serial.println(actuator_id);
       continue;
     }
     
@@ -375,7 +375,8 @@ void readCurrentSensePins() {
     // We need to send the float as a uint32_t by bit-casting
     uint32_t voltage_bits;
     memcpy(&voltage_bits, &voltage, sizeof(float));
-    chunk.add_datapoint(sensor_id, voltage_bits);
+    // Sensor ID in packet is 1-indexed and matches actuator ID
+    chunk.add_datapoint(actuator_id, voltage_bits);
   }
   
   // Send the sensor data packet if we have data
