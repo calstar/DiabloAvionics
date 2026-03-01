@@ -43,6 +43,26 @@ static SensorHotfire::Config coreConfig;
 // Set to true to enable Serial output from core and board; false to disable.
 bool g_sensor_hotfire_serial = true;
 
+static uint8_t map_reference_to_ref_pos(uint8_t reference_voltage) {
+  // 0 = internal 2.5V, 1 = VDD, 2 = "5V" request (mapped to VDD on ADS126X).
+  if (reference_voltage == 1 || reference_voltage == 2) {
+    return ADS126X_REF_POS_VDD;
+  }
+  return ADS126X_REF_POS_INT;
+}
+
+static void reconfigure_adc_for_reference(uint8_t reference_voltage) {
+  const uint8_t ref_pos = map_reference_to_ref_pos(reference_voltage);
+
+  ads126x.stopADC1();
+  ads126x.setInputMux(static_cast<uint8_t>(getAdcChannel(1, TEST_PIN)), ADS126X_AINCOM);
+  ads126x.bypassPGA();
+  ads126x.setFilter(FILTER);
+  ads126x.setRate(DATA_RATE);
+  ads126x.setReference(ADS126X_REF_NEG_VSS, ref_pos);
+  ads126x.startADC1();
+}
+
 static float convert_code_to_voltage(int32_t code) {
   return (static_cast<float>(code) * 2.5f) / 2147483648.0f;
 }
@@ -112,20 +132,14 @@ static void init_adc_cb(void*) {
   ADC_SPI.setDataMode(SPI_MODE1);
   pinMode(Pins.ADC_DRDY_1, INPUT);
   ads126x.begin(Pins.ADC_CS_1, &ADC_SPI);
-  ads126x.stopADC1();
-  ads126x.setInputMux(static_cast<uint8_t>(getAdcChannel(1, TEST_PIN)), ADS126X_AINCOM);
-  ads126x.bypassPGA();
-  ads126x.setFilter(FILTER);
-  ads126x.setRate(DATA_RATE);
   // Default: internal 2.5V reference until SENSOR_CONFIG sets reference_voltage
-  ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
-  ads126x.startADC1();
+  reconfigure_adc_for_reference(0);
 }
 
 static void on_reference_voltage_cb(void*, uint8_t reference_voltage) {
-  // 0 = internal 2.5V, 1 = VDD, 2 = 5V (ignored; use internal)
-  uint8_t ref_pos = (reference_voltage == 1) ? ADS126X_REF_POS_VDD : ADS126X_REF_POS_INT;
-  ads126x.setReference(ADS126X_REF_NEG_VSS, ref_pos);
+  // Reinitialize ADC every time config is resent so the new reference is fully applied.
+  reconfigure_adc_for_reference(reference_voltage);
+  dataChunks.clear();
 }
 
 static void collect_chunk_cb(void*) { collect_chunk_impl(); }
