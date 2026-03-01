@@ -33,7 +33,6 @@ using namespace sense_board_pins;
 #define FILTER       ADS126X_SINC4
 #define DATA_RATE    ADS126X_RATE_7200
 #define TEST_PIN     1
-#define NUM_CHANNELS 10
 #define MAX_CHUNKS   9
 
 static ADS126X ads126x;
@@ -55,9 +54,15 @@ static void flush_cycles(int cycles) {
 }
 
 static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_CHANNELS);
-  for (uint8_t connector_id = 1; connector_id <= NUM_CHANNELS; connector_id++) {
-    ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
+  const SensorHotfire::StoredSensorConfig& cfg = coreState.stored_config;
+  const uint8_t n = cfg.valid ? cfg.num_sensors : 0;
+  if (n == 0) return;
+  Diablo::SensorDataChunkCollection chunk(millis(), n);
+  for (uint8_t i = 0; i < n; i++) {
+    const uint8_t connector_id = cfg.sensor_ids[i];
+    const int ch = getAdcChannel(connector_id, TEST_PIN);
+    if (ch < 0) continue;
+    ads126x.setInputMux(static_cast<uint8_t>(ch), ADS126X_AINCOM);
     flush_cycles(settlePulses(FILTER, DATA_RATE));
     uint32_t value = 0u;
     for (int r = 0; r < READINGS_PER_CONNECTOR; r++) {
@@ -69,7 +74,7 @@ static void collect_chunk_impl() {
     }
     chunk.add_datapoint(connector_id, value);
   }
-  if (chunk.size() == NUM_CHANNELS) {
+  if (chunk.size() == n) {
     dataChunks.push_back(chunk);
     if (coreConfig.debug_packets) {
       SENSOR_HOTFIRE_PRINT("Chunk pushed, total chunks=");
@@ -89,11 +94,13 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
                                 bool also_to_abort_controller,
                                 IPAddress abort_controller_ip, int abort_controller_port) {
   if (dataChunks.empty()) return;
+  const uint8_t num_sensors = coreState.stored_config.num_sensors;
+  if (num_sensors == 0) return;
   size_t n = (dataChunks.size() > MAX_CHUNKS) ? MAX_CHUNKS : dataChunks.size();
   std::vector<Diablo::SensorDataChunkCollection> batch(dataChunks.begin(), dataChunks.begin() + n);
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
-      batch, static_cast<uint8_t>(NUM_CHANNELS), packetBuffer, sizeof(packetBuffer));
+      batch, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) {
     SENSOR_HOTFIRE_PRINT("Send FAIL: create_sensor_data_packet returned 0 (n=");
     SENSOR_HOTFIRE_PRINT(n);
@@ -182,7 +189,9 @@ void setup() {
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
-  coreConfig.user_data = nullptr;
+  coreConfig.user_data = &coreState;
+  coreConfig.default_sensor_ids = TC_DEFAULT_SENSOR_IDS;
+  coreConfig.default_num_sensors = TC_DEFAULT_NUM_SENSORS;
 
   SensorHotfire::setup(coreState, coreConfig);
 }

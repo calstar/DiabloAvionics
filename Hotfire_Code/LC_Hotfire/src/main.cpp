@@ -34,10 +34,7 @@ using namespace sense_board_pins;
 #define FILTER       ADS126X_SINC4
 #define DATA_RATE    ADS126X_RATE_7200
 #define GAIN         ADS126X_GAIN_32
-#define NUM_CHANNELS 5
 #define MAX_CHUNKS   9
-
-static const uint8_t LC_ADC1_CONNECTORS[] = { 1, 2, 3, 6, 7 };
 
 static ADS126X ads126x;
 SPIClass ADC_SPI(HSPI);
@@ -58,9 +55,12 @@ static void flush_cycles(int cycles) {
 }
 
 static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_CHANNELS);
-  for (size_t i = 0; i < NUM_CHANNELS; i++) {
-    const uint8_t connector_id = LC_ADC1_CONNECTORS[i];
+  const SensorHotfire::StoredSensorConfig& cfg = coreState.stored_config;
+  const uint8_t n = cfg.valid ? cfg.num_sensors : 0;
+  if (n == 0) return;
+  Diablo::SensorDataChunkCollection chunk(millis(), n);
+  for (uint8_t i = 0; i < n; i++) {
+    const uint8_t connector_id = cfg.sensor_ids[i];
     const int ch1 = getAdcChannel(connector_id, 1);
     const int ch2 = getAdcChannel(connector_id, 2);
     if (ch1 < 0 || ch2 < 0) continue;
@@ -76,7 +76,7 @@ static void collect_chunk_impl() {
     }
     chunk.add_datapoint(connector_id, value);
   }
-  if (chunk.size() == NUM_CHANNELS) {
+  if (chunk.size() == n) {
     dataChunks.push_back(chunk);
     if (coreConfig.debug_packets) {
       SENSOR_HOTFIRE_PRINT("Chunk pushed, total chunks=");
@@ -96,11 +96,13 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
                                 bool also_to_abort_controller,
                                 IPAddress abort_controller_ip, int abort_controller_port) {
   if (dataChunks.empty()) return;
+  const uint8_t num_sensors = coreState.stored_config.num_sensors;
+  if (num_sensors == 0) return;
   size_t n = (dataChunks.size() > MAX_CHUNKS) ? MAX_CHUNKS : dataChunks.size();
   std::vector<Diablo::SensorDataChunkCollection> batch(dataChunks.begin(), dataChunks.begin() + n);
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
-      batch, static_cast<uint8_t>(NUM_CHANNELS), packetBuffer, sizeof(packetBuffer));
+      batch, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) {
     SENSOR_HOTFIRE_PRINT("Send FAIL: create_sensor_data_packet returned 0 (n=");
     SENSOR_HOTFIRE_PRINT(n);
@@ -190,7 +192,9 @@ void setup() {
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
-  coreConfig.user_data = nullptr;
+  coreConfig.user_data = &coreState;
+  coreConfig.default_sensor_ids = LC_DEFAULT_SENSOR_IDS;
+  coreConfig.default_num_sensors = LC_DEFAULT_NUM_SENSORS;
 
   SensorHotfire::setup(coreState, coreConfig);
 }

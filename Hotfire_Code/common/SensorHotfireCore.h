@@ -31,6 +31,9 @@
 #ifndef SENSOR_UDP_LISTEN_PORT
 #define SENSOR_UDP_LISTEN_PORT 5005
 #endif
+#ifndef SENSOR_CONFIG_MAX_CHANNELS
+#define SENSOR_CONFIG_MAX_CHANNELS 64
+#endif
 
 // Serial output gated by this flag (define in one .cpp per project, e.g. main.cpp).
 extern bool g_sensor_hotfire_serial;
@@ -59,6 +62,8 @@ struct StoredSensorConfig {
   uint8_t reference_voltage;   // 0 = internal 2.5V, 1 = VDD, 2 = 5V (ignored; treat as 0)
   bool necessary_for_abort;
   uint32_t actuator_controller_ip;
+  uint8_t sensor_ids[SENSOR_CONFIG_MAX_CHANNELS];
+  uint8_t num_sensors;
 };
 
 struct Config {
@@ -75,6 +80,9 @@ struct Config {
   /** Called when SENSOR_CONFIG is received with reference_voltage byte (0=2.5V internal, 1=VDD, 2=ignore). */
   void (*on_reference_voltage_config)(void* user_data, uint8_t reference_voltage);
   void* user_data;
+  /** Default channel list when config has 0 sensors (legacy packet or empty). Board fills this in setup. */
+  const uint8_t* default_sensor_ids;
+  uint8_t default_num_sensors;
 };
 
 struct CoreState {
@@ -142,36 +150,68 @@ inline IncomingPacketKind processIncomingPacket(CoreState& s, const Config& cfg,
   if (hdr.packet_type == Diablo::PacketType::SENSOR_CONFIG) {
     // Server IP/port are hardcoded; do not set from remote
     s.stored_config.valid = true;
-    // New format (len >= 8): reference_voltage(1), necessary_for_abort(1), [controller_ip(4)], [enable_serial_printing(1)]
-    // Old format (len == 7): necessary_for_abort(1) only; treat reference_voltage as 0
-    if (len >= 6 + 2) {
-      s.stored_config.reference_voltage = buffer[6];
-      s.stored_config.necessary_for_abort = (buffer[7] != 0);
-      if (s.stored_config.necessary_for_abort && len >= 6 + 6) {
+    // New format (len >= 9): num_sensors(1), sensor_ids(N), reference_voltage(1), necessary_for_abort(1), [controller_ip(4)], enable_serial_printing(1)
+    // Legacy format (len < 9): no sensor list; use default_sensor_ids from config if provided
+    if (len >= 9) {
+      const uint8_t num_sensors = buffer[6];
+      s.stored_config.num_sensors = (num_sensors <= SENSOR_CONFIG_MAX_CHANNELS) ? num_sensors : SENSOR_CONFIG_MAX_CHANNELS;
+      for (uint8_t i = 0; i < s.stored_config.num_sensors && (7 + i) < len; i++) {
+        s.stored_config.sensor_ids[i] = buffer[7 + i];
+      }
+      size_t offset = 7 + num_sensors;
+      s.stored_config.reference_voltage = (offset < len) ? buffer[offset++] : 0;
+      s.stored_config.necessary_for_abort = (offset < len) ? (buffer[offset++] != 0) : false;
+      if (offset + 4 <= len) {
         s.stored_config.actuator_controller_ip =
-            (static_cast<uint32_t>(buffer[8]) << 24) |
-            (static_cast<uint32_t>(buffer[9]) << 16) |
-            (static_cast<uint32_t>(buffer[10]) << 8) |
-            static_cast<uint32_t>(buffer[11]);
+            (static_cast<uint32_t>(buffer[offset]) << 24) |
+            (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
+            (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
+            static_cast<uint32_t>(buffer[offset + 3]);
+        offset += 4;
       } else {
         s.stored_config.actuator_controller_ip = 0;
       }
+      if (len > 0)
+        g_sensor_hotfire_serial = (buffer[len - 1] != 0);
       if (cfg.on_reference_voltage_config)
         cfg.on_reference_voltage_config(cfg.user_data, s.stored_config.reference_voltage);
-      // DAQv2-Comms: enable_serial_printing is last byte of body (at 8 when no controller_ip, at 12 when with controller_ip)
-      if (len >= 9)
-        g_sensor_hotfire_serial = (buffer[len - 1] != 0);
-    } else if (len >= 6 + 1) {
-      // Old format: single byte at 6 = necessary_for_abort
-      s.stored_config.reference_voltage = 0;
-      s.stored_config.necessary_for_abort = (buffer[6] != 0);
-      s.stored_config.actuator_controller_ip = (len >= 6 + 5) ?
-          (static_cast<uint32_t>(buffer[7]) << 24) |
-          (static_cast<uint32_t>(buffer[8]) << 16) |
-          (static_cast<uint32_t>(buffer[9]) << 8) |
-          static_cast<uint32_t>(buffer[10]) : 0;
-      if (cfg.on_reference_voltage_config)
-        cfg.on_reference_voltage_config(cfg.user_data, 0);
+    } else {
+      // Legacy format: no sensor list
+      s.stored_config.num_sensors = 0;
+      if (cfg.default_sensor_ids && cfg.default_num_sensors > 0) {
+        s.stored_config.num_sensors = (cfg.default_num_sensors <= SENSOR_CONFIG_MAX_CHANNELS)
+            ? cfg.default_num_sensors : SENSOR_CONFIG_MAX_CHANNELS;
+        for (uint8_t i = 0; i < s.stored_config.num_sensors; i++) {
+          s.stored_config.sensor_ids[i] = cfg.default_sensor_ids[i];
+        }
+      }
+      if (len >= 8) {
+        s.stored_config.reference_voltage = buffer[6];
+        s.stored_config.necessary_for_abort = (buffer[7] != 0);
+        if (s.stored_config.necessary_for_abort && len >= 12) {
+          s.stored_config.actuator_controller_ip =
+              (static_cast<uint32_t>(buffer[8]) << 24) |
+              (static_cast<uint32_t>(buffer[9]) << 16) |
+              (static_cast<uint32_t>(buffer[10]) << 8) |
+              static_cast<uint32_t>(buffer[11]);
+        } else {
+          s.stored_config.actuator_controller_ip = 0;
+        }
+        if (len >= 13)
+          g_sensor_hotfire_serial = (buffer[12] != 0);
+        if (cfg.on_reference_voltage_config)
+          cfg.on_reference_voltage_config(cfg.user_data, s.stored_config.reference_voltage);
+      } else if (len >= 7) {
+        s.stored_config.reference_voltage = 0;
+        s.stored_config.necessary_for_abort = (buffer[6] != 0);
+        s.stored_config.actuator_controller_ip = (len >= 11) ?
+            (static_cast<uint32_t>(buffer[7]) << 24) |
+            (static_cast<uint32_t>(buffer[8]) << 16) |
+            (static_cast<uint32_t>(buffer[9]) << 8) |
+            static_cast<uint32_t>(buffer[10]) : 0;
+        if (cfg.on_reference_voltage_config)
+          cfg.on_reference_voltage_config(cfg.user_data, 0);
+      }
     }
     return IncomingPacketKind::SensorConfig;
   }

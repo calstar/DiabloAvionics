@@ -32,7 +32,6 @@ using namespace sense_board_pins;
 //-----------------------------------------------------------------------------
 #define FILTER                 ADS126X_SINC4
 #define DATA_RATE              ADS126X_RATE_1200
-#define NUM_CONNECTORS         2   // Connectors 1 and 2 only (match RTD_Testing)
 #define MAX_CHUNKS_BEFORE_SEND 9
 
 static ADS126X ads126x;
@@ -81,13 +80,17 @@ static void read_single_connector(uint8_t connector_id, int num_readings,
 }
 
 static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_CONNECTORS);
-  for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
+  const SensorHotfire::StoredSensorConfig& cfg = coreState.stored_config;
+  const uint8_t n = cfg.valid ? cfg.num_sensors : 0;
+  if (n == 0) return;
+  Diablo::SensorDataChunkCollection chunk(millis(), n);
+  for (uint8_t i = 0; i < n; i++) {
+    const uint8_t connector_id = cfg.sensor_ids[i];
     set_connector_rtd(connector_id);
     flush_cycles(settlePulses(FILTER, DATA_RATE));
     read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
   }
-  if (chunk.size() == NUM_CONNECTORS && dataChunks.size() < MAX_CHUNKS_BEFORE_SEND)
+  if (chunk.size() == n && dataChunks.size() < MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -96,9 +99,11 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
                                 IPAddress abort_controller_ip, int abort_controller_port) {
   if (dataChunks.empty()) return;
   if (dataChunks.size() < MAX_CHUNKS_BEFORE_SEND) return;
+  const uint8_t num_sensors = coreState.stored_config.num_sensors;
+  if (num_sensors == 0) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
-      dataChunks, static_cast<uint8_t>(NUM_CONNECTORS), packetBuffer, sizeof(packetBuffer));
+      dataChunks, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
   coreState.udp.beginPacket(dest_ip, dest_port);
   coreState.udp.write(packetBuffer, packetSize);
@@ -162,7 +167,9 @@ void setup() {
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
-  coreConfig.user_data = nullptr;
+  coreConfig.user_data = &coreState;
+  coreConfig.default_sensor_ids = RTD_DEFAULT_SENSOR_IDS;
+  coreConfig.default_num_sensors = RTD_DEFAULT_NUM_SENSORS;
 
   SensorHotfire::setup(coreState, coreConfig);
 }
