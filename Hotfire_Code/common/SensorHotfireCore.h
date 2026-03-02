@@ -140,39 +140,64 @@ inline IncomingPacketKind processIncomingPacket(CoreState& s, const Config& cfg,
   }
 
   if (hdr.packet_type == Diablo::PacketType::SENSOR_CONFIG) {
-    // Server IP/port are hardcoded; do not set from remote
-    s.stored_config.valid = true;
-    // New format (len >= 8): reference_voltage(1), necessary_for_abort(1), [controller_ip(4)], [enable_serial_printing(1)]
-    // Old format (len == 7): necessary_for_abort(1) only; treat reference_voltage as 0
-    if (len >= 6 + 2) {
-      s.stored_config.reference_voltage = buffer[6];
-      s.stored_config.necessary_for_abort = (buffer[7] != 0);
-      if (s.stored_config.necessary_for_abort && len >= 6 + 6) {
-        s.stored_config.actuator_controller_ip =
-            (static_cast<uint32_t>(buffer[8]) << 24) |
-            (static_cast<uint32_t>(buffer[9]) << 16) |
-            (static_cast<uint32_t>(buffer[10]) << 8) |
-            static_cast<uint32_t>(buffer[11]);
-      } else {
-        s.stored_config.actuator_controller_ip = 0;
-      }
-      if (cfg.on_reference_voltage_config)
-        cfg.on_reference_voltage_config(cfg.user_data, s.stored_config.reference_voltage);
-      // DAQv2-Comms: enable_serial_printing is last byte of body (at 8 when no controller_ip, at 12 when with controller_ip)
-      if (len >= 9)
-        g_sensor_hotfire_serial = (buffer[len - 1] != 0);
-    } else if (len >= 6 + 1) {
-      // Old format: single byte at 6 = necessary_for_abort
-      s.stored_config.reference_voltage = 0;
-      s.stored_config.necessary_for_abort = (buffer[6] != 0);
-      s.stored_config.actuator_controller_ip = (len >= 6 + 5) ?
-          (static_cast<uint32_t>(buffer[7]) << 24) |
-          (static_cast<uint32_t>(buffer[8]) << 16) |
-          (static_cast<uint32_t>(buffer[9]) << 8) |
-          static_cast<uint32_t>(buffer[10]) : 0;
-      if (cfg.on_reference_voltage_config)
-        cfg.on_reference_voltage_config(cfg.user_data, 0);
+    Diablo::PacketHeader dummy;
+    std::vector<uint8_t> sensor_ids;
+    uint8_t reference_voltage = 0;
+    bool necessary_for_abort = false;
+    uint32_t controller_ip = 0;
+    uint8_t enable_serial_printing = 1;
+
+    if (!Diablo::parse_sensor_config_packet(buffer, len,
+                                            dummy,
+                                            sensor_ids,
+                                            reference_voltage,
+                                            necessary_for_abort,
+                                            controller_ip,
+                                            enable_serial_printing)) {
+      Serial.println("SENSOR_CONFIG parse failed (DAQv2-Comms)");
+      Serial.flush();
+      return IncomingPacketKind::None;
     }
+
+    s.stored_config.valid = true;
+    s.stored_config.reference_voltage = reference_voltage;
+    s.stored_config.necessary_for_abort = necessary_for_abort;
+    s.stored_config.actuator_controller_ip = controller_ip;
+
+    if (cfg.on_reference_voltage_config)
+      cfg.on_reference_voltage_config(cfg.user_data, s.stored_config.reference_voltage);
+
+    g_sensor_hotfire_serial = (enable_serial_printing != 0);
+
+    Serial.println("SENSOR_CONFIG received (DAQv2-Comms):");
+    Serial.print("  num_sensors=");
+    Serial.println(static_cast<unsigned>(sensor_ids.size()));
+    Serial.print("  sensor_ids=");
+    if (!sensor_ids.empty()) {
+      for (size_t i = 0; i < sensor_ids.size(); ++i) {
+        if (i) Serial.print(",");
+        Serial.print(static_cast<unsigned>(sensor_ids[i]));
+      }
+      Serial.println();
+    } else {
+      Serial.println("(none)");
+    }
+    Serial.print("  reference_voltage=");
+    Serial.println(static_cast<unsigned>(s.stored_config.reference_voltage));
+    Serial.print("  necessary_for_abort=");
+    Serial.println(s.stored_config.necessary_for_abort ? 1 : 0);
+    Serial.print("  actuator_controller_ip=");
+    if (s.stored_config.actuator_controller_ip != 0) {
+      const uint8_t* ip_bytes =
+          reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
+      IPAddress actuatorIP(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+      Serial.println(actuatorIP);
+    } else {
+      Serial.println("0.0.0.0");
+    }
+    Serial.print("  enable_serial_printing=");
+    Serial.println(g_sensor_hotfire_serial ? 1 : 0);
+    Serial.flush();
     return IncomingPacketKind::SensorConfig;
   }
 
@@ -414,11 +439,9 @@ inline void loop(CoreState& s, const Config& cfg) {
       break;
     case State::StandaloneAbort:
       if (cfg.send_chunks_to) {
-        IPAddress actuatorIP(
-            (s.stored_config.actuator_controller_ip >> 24) & 0xFF,
-            (s.stored_config.actuator_controller_ip >> 16) & 0xFF,
-            (s.stored_config.actuator_controller_ip >> 8) & 0xFF,
-            s.stored_config.actuator_controller_ip & 0xFF);
+        const uint8_t* ip_bytes =
+            reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
+        IPAddress actuatorIP(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
         bool also_abort = s.stored_config.valid && s.stored_config.actuator_controller_ip != 0;
         cfg.send_chunks_to(cfg.user_data, s.serverIP, s.serverPort,
                            also_abort, actuatorIP, s.serverPortDefault);
@@ -455,11 +478,9 @@ inline void loop(CoreState& s, const Config& cfg) {
         if (!s.stored_config.valid || s.stored_config.actuator_controller_ip == 0)
           sendBoardHeartbeat(s, cfg, Diablo::BoardState::ABORT, s.serverIP, s.serverPort);
         else {
-          IPAddress actuatorIP(
-              (s.stored_config.actuator_controller_ip >> 24) & 0xFF,
-              (s.stored_config.actuator_controller_ip >> 16) & 0xFF,
-              (s.stored_config.actuator_controller_ip >> 8) & 0xFF,
-              s.stored_config.actuator_controller_ip & 0xFF);
+          const uint8_t* ip_bytes =
+              reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
+          IPAddress actuatorIP(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
           sendBoardHeartbeat(s, cfg, Diablo::BoardState::ABORT, actuatorIP, s.serverPortDefault);
         }
         break;

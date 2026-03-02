@@ -33,7 +33,6 @@ using namespace sense_board_pins;
 #define FILTER                 ADS126X_SINC4
 #define DATA_RATE              ADS126X_RATE_1200
 #define NUM_CONNECTORS         2   // Connectors 1 and 2 only (match RTD_Testing)
-#define MAX_CHUNKS_BEFORE_SEND 9
 
 static ADS126X ads126x;
 SPIClass ADC_SPI(HSPI);
@@ -41,6 +40,8 @@ std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 
 static SensorHotfire::CoreState coreState;
 static SensorHotfire::Config coreConfig;
+
+static unsigned long g_last_sensor_packet_log_ms = 0;
 
 bool g_sensor_hotfire_serial = true;
 
@@ -87,7 +88,7 @@ static void collect_chunk_impl() {
     flush_cycles(settlePulses(FILTER, DATA_RATE));
     read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
   }
-  if (chunk.size() == NUM_CONNECTORS && dataChunks.size() < MAX_CHUNKS_BEFORE_SEND)
+  if (chunk.size() == NUM_CONNECTORS && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -95,7 +96,7 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
                                 bool also_to_abort_controller,
                                 IPAddress abort_controller_ip, int abort_controller_port) {
   if (dataChunks.empty()) return;
-  if (dataChunks.size() < MAX_CHUNKS_BEFORE_SEND) return;
+  if (dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
       dataChunks, static_cast<uint8_t>(NUM_CONNECTORS), packetBuffer, sizeof(packetBuffer));
@@ -107,6 +108,29 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   SENSOR_HOTFIRE_PRINT(dest_ip);
   SENSOR_HOTFIRE_PRINT(":");
   SENSOR_HOTFIRE_PRINTLN(dest_port);
+
+  unsigned long now = millis();
+  if (now - g_last_sensor_packet_log_ms >= 1000) {
+    g_last_sensor_packet_log_ms = now;
+    SENSOR_HOTFIRE_PRINTLN("SENSOR_DATA contents:");
+    for (size_t i = 0; i < dataChunks.size(); ++i) {
+      const auto& chunk = dataChunks[i];
+      SENSOR_HOTFIRE_PRINT("  chunk ");
+      SENSOR_HOTFIRE_PRINT(i);
+      SENSOR_HOTFIRE_PRINT(" ts=");
+      SENSOR_HOTFIRE_PRINT(chunk.timestamp);
+      SENSOR_HOTFIRE_PRINT(" :");
+      for (const auto& dp : chunk.datapoints) {
+        SENSOR_HOTFIRE_PRINT(" (id=");
+        SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(dp.sensor_id));
+        SENSOR_HOTFIRE_PRINT(", data=");
+        SENSOR_HOTFIRE_PRINT(dp.data);
+        SENSOR_HOTFIRE_PRINT(")");
+      }
+      SENSOR_HOTFIRE_PRINTLN_();
+    }
+  }
+
   if (also_to_abort_controller) {
     coreState.udp.beginPacket(abort_controller_ip, abort_controller_port);
     coreState.udp.write(packetBuffer, packetSize);

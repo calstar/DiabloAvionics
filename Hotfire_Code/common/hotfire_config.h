@@ -25,8 +25,11 @@
 
 // Temporary: set to non-zero (1-254) to hardcode board ID and skip SPIFFS.
 // Set to 0 to use SPIFFS (normal). Easy to undo: set back to 0.
-#define TEMP_HARDCODE_BOARD_ID      51
+#define TEMP_HARDCODE_BOARD_ID      31
 
 // Server (all hotfire boards send heartbeats/data here; hardcoded, not updated from packets)
 #define HOTFIRE_SERVER_IP_OCTET_4   20   // 192.168.2.20
 #define HOTFIRE_SERVER_PORT         5006
+
+// Sensor data: chunks per packet (all sense boards: PT, TC, LC, RTD)
+#define HOTFIRE_CHUNKS_PER_PACKET   9

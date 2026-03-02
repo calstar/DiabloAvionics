@@ -40,6 +40,8 @@ std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 static SensorHotfire::CoreState coreState;
 static SensorHotfire::Config coreConfig;
 
+static unsigned long g_last_sensor_packet_log_ms = 0;
+
 // Set to true to enable Serial output from core and board; false to disable.
 bool g_sensor_hotfire_serial = true;
 
@@ -95,6 +97,29 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   SENSOR_HOTFIRE_PRINT(dest_ip);
   SENSOR_HOTFIRE_PRINT(":");
   SENSOR_HOTFIRE_PRINTLN(dest_port);
+
+  unsigned long now = millis();
+  if (now - g_last_sensor_packet_log_ms >= 1000) {
+    g_last_sensor_packet_log_ms = now;
+    SENSOR_HOTFIRE_PRINTLN("SENSOR_DATA contents:");
+    for (size_t i = 0; i < dataChunks.size(); ++i) {
+      const auto& chunk = dataChunks[i];
+      SENSOR_HOTFIRE_PRINT("  chunk ");
+      SENSOR_HOTFIRE_PRINT(i);
+      SENSOR_HOTFIRE_PRINT(" ts=");
+      SENSOR_HOTFIRE_PRINT(chunk.timestamp);
+      SENSOR_HOTFIRE_PRINT(" :");
+      for (const auto& dp : chunk.datapoints) {
+        SENSOR_HOTFIRE_PRINT(" (id=");
+        SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(dp.sensor_id));
+        SENSOR_HOTFIRE_PRINT(", data=");
+        SENSOR_HOTFIRE_PRINT(dp.data);
+        SENSOR_HOTFIRE_PRINT(")");
+      }
+      SENSOR_HOTFIRE_PRINTLN_();
+    }
+  }
+
   if (also_to_abort_controller) {
     coreState.udp.beginPacket(abort_controller_ip, abort_controller_port);
     coreState.udp.write(packetBuffer, packetSize);
@@ -117,8 +142,7 @@ static void init_adc_cb(void*) {
   ads126x.bypassPGA();
   ads126x.setFilter(FILTER);
   ads126x.setRate(DATA_RATE);
-  // Default: internal 2.5V reference until SENSOR_CONFIG sets reference_voltage
-  ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
+  // Reference is not configured here; it must be set from server SENSOR_CONFIG
   ads126x.startADC1();
 }
 

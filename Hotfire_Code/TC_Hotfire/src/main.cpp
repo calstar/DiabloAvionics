@@ -34,7 +34,6 @@ using namespace sense_board_pins;
 #define DATA_RATE    ADS126X_RATE_7200
 #define TEST_PIN     1
 #define NUM_CHANNELS 10
-#define MAX_CHUNKS   9
 
 static ADS126X ads126x;
 SPIClass ADC_SPI(HSPI);
@@ -42,6 +41,8 @@ std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 
 static SensorHotfire::CoreState coreState;
 static SensorHotfire::Config coreConfig;
+
+static unsigned long g_last_sensor_packet_log_ms = 0;
 
 // Set to true to enable Serial output from core and board; false to disable.
 bool g_sensor_hotfire_serial = true;
@@ -69,34 +70,21 @@ static void collect_chunk_impl() {
     }
     chunk.add_datapoint(connector_id, value);
   }
-  if (chunk.size() == NUM_CHANNELS) {
+  if (chunk.size() == NUM_CHANNELS && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
-    if (coreConfig.debug_packets) {
-      SENSOR_HOTFIRE_PRINT("Chunk pushed, total chunks=");
-      SENSOR_HOTFIRE_PRINTLN(dataChunks.size());
-    }
-  } else if (coreConfig.debug_packets) {
-    static unsigned long lastIncompleteLog = 0;
-    if (millis() - lastIncompleteLog >= 2000) {
-      lastIncompleteLog = millis();
-      SENSOR_HOTFIRE_PRINT("Chunk incomplete: size=");
-      SENSOR_HOTFIRE_PRINTLN(chunk.size());
-    }
-  }
 }
 
 static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
                                 bool also_to_abort_controller,
                                 IPAddress abort_controller_ip, int abort_controller_port) {
   if (dataChunks.empty()) return;
-  size_t n = (dataChunks.size() > MAX_CHUNKS) ? MAX_CHUNKS : dataChunks.size();
-  std::vector<Diablo::SensorDataChunkCollection> batch(dataChunks.begin(), dataChunks.begin() + n);
+  if (dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
-      batch, static_cast<uint8_t>(NUM_CHANNELS), packetBuffer, sizeof(packetBuffer));
+      dataChunks, static_cast<uint8_t>(NUM_CHANNELS), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) {
     SENSOR_HOTFIRE_PRINT("Send FAIL: create_sensor_data_packet returned 0 (n=");
-    SENSOR_HOTFIRE_PRINT(n);
+    SENSOR_HOTFIRE_PRINT(dataChunks.size());
     SENSOR_HOTFIRE_PRINT(", buf=");
     SENSOR_HOTFIRE_PRINT(SENSOR_HOTFIRE_MAX_PACKET_SIZE);
     SENSOR_HOTFIRE_PRINTLN(")");
@@ -109,6 +97,29 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   SENSOR_HOTFIRE_PRINT(dest_ip);
   SENSOR_HOTFIRE_PRINT(":");
   SENSOR_HOTFIRE_PRINTLN(dest_port);
+
+  unsigned long now = millis();
+  if (now - g_last_sensor_packet_log_ms >= 1000) {
+    g_last_sensor_packet_log_ms = now;
+    SENSOR_HOTFIRE_PRINTLN("SENSOR_DATA contents:");
+    for (size_t i = 0; i < dataChunks.size(); ++i) {
+      const auto& chunk = dataChunks[i];
+      SENSOR_HOTFIRE_PRINT("  chunk ");
+      SENSOR_HOTFIRE_PRINT(i);
+      SENSOR_HOTFIRE_PRINT(" ts=");
+      SENSOR_HOTFIRE_PRINT(chunk.timestamp);
+      SENSOR_HOTFIRE_PRINT(" :");
+      for (const auto& dp : chunk.datapoints) {
+        SENSOR_HOTFIRE_PRINT(" (id=");
+        SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(dp.sensor_id));
+        SENSOR_HOTFIRE_PRINT(", data=");
+        SENSOR_HOTFIRE_PRINT(dp.data);
+        SENSOR_HOTFIRE_PRINT(")");
+      }
+      SENSOR_HOTFIRE_PRINTLN_();
+    }
+  }
+
   if (also_to_abort_controller) {
     coreState.udp.beginPacket(abort_controller_ip, abort_controller_port);
     coreState.udp.write(packetBuffer, packetSize);
@@ -122,7 +133,7 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
     SENSOR_HOTFIRE_PRINT("Sent sensor data: ");
     SENSOR_HOTFIRE_PRINT(packetSize);
     SENSOR_HOTFIRE_PRINT(" bytes, ");
-    SENSOR_HOTFIRE_PRINT(n);
+    SENSOR_HOTFIRE_PRINT(dataChunks.size());
     SENSOR_HOTFIRE_PRINT(" chunks -> ");
     SENSOR_HOTFIRE_PRINT(dest_ip);
     SENSOR_HOTFIRE_PRINT(":");
@@ -135,7 +146,7 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
     }
     SENSOR_HOTFIRE_PRINTLN_();
   }
-  dataChunks.erase(dataChunks.begin(), dataChunks.begin() + n);
+  dataChunks.clear();
 }
 
 static void init_adc_cb(void*) {

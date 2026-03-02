@@ -10,5 +10,5 @@
 // Server heartbeat timeout (optional; sensor core may use for connection loss)
 #define HEARTBEAT_TIMEOUT_MS              5000   // Server heartbeat watchdog
 
-// Sensor data chunking: max chunks buffered before send
-#define SENSOR_MAX_CHUNKS_BEFORE_SEND     9
+// Sensor data chunking: max chunks per packet (from hotfire_config.h)
+#define SENSOR_MAX_CHUNKS_BEFORE_SEND     HOTFIRE_CHUNKS_PER_PACKET
