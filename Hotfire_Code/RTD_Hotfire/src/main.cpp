@@ -3,7 +3,8 @@
  *
  * Same state machine as PT/TC/LC: Waiting for Server → Active → Standalone Abort.
  * Sends heartbeats, streams RTD (differential + IDAC excitation) sensor data to server or abort controller.
- * Uses RTD_Board pin layout and BoardType::RTD. Reads connectors 1 & 2 only (differential pin 1 vs 2, IDAC excitation).
+ * Uses RTD_Board pin layout and BoardType::RTD. Reads connectors 1–4 (two physical ADS1263 chips).
+ * ADC1 (ADC_CS_1) handles connectors 1 & 2; ADC2 (ADC_CS_2) handles connectors 3 & 4.
  * Based on RTD_Testing project for proper RTD read sequence.
  */
 
@@ -19,22 +20,27 @@
 
 #include "main.h"
 #include "STAR_ADS126X.h"
+
+// MUST be defined before sense_board_pins.h / connector_adc_map.h
+#define PINS_ACTIVE_LAYOUT sense_board_pins::RTD_Board
+
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 #include "adc_mappings.h"
 #include "SensorHotfireCore.h"
 
-#define PINS_ACTIVE_LAYOUT sense_board_pins::RTD_Board
 using namespace sense_board_pins;
 
 //-----------------------------------------------------------------------------
 // ADC config — RTD: differential (pin 1 vs pin 2) + IDAC excitation per connector (from RTD_Testing)
 //-----------------------------------------------------------------------------
 #define FILTER                 ADS126X_SINC4
-#define DATA_RATE              ADS126X_RATE_1200
-#define NUM_CONNECTORS         2   // Connectors 1 and 2 only (match RTD_Testing)
+#define DATA_RATE              ADS126X_RATE_7200
+ADS126X_ASSERT_FILTER_RATE(FILTER, DATA_RATE);
+#define NUM_CONNECTORS         4   // Connectors 1–4 (ADC1: 1&2, ADC2: 3&4)
 
-static ADS126X ads126x;
+static ADS126X ads126x;    // ADC1 — connectors 1 & 2
+static ADS126X ads126x_2;  // ADC2 — connectors 3 & 4
 SPIClass ADC_SPI(HSPI);
 std::vector<Diablo::SensorDataChunkCollection> dataChunks;
 
@@ -45,50 +51,49 @@ static unsigned long g_last_sensor_packet_log_ms = 0;
 
 bool g_sensor_hotfire_serial = true;
 
-// Wait for DRDY cycles to let pipeline settle (RTD_Testing style: wait only, no read)
-static void flush_cycles(int cycles) {
-  for (int i = 0; i < cycles; i++) {
-    while (digitalRead(Pins.ADC_DRDY_1) != LOW)
-      delayMicroseconds(10);
-  }
+// Helper: get the correct ADS126X instance and DRDY pin for a connector
+static ADS126X& adc_for_connector(uint8_t connector_id) {
+  return (getAdcIndex(connector_id, 1) == 2) ? ads126x_2 : ads126x;
+}
+static int drdy_for_connector(uint8_t connector_id) {
+  return (getAdcIndex(connector_id, 1) == 2) ? Pins.ADC_DRDY_2 : Pins.ADC_DRDY_1;
 }
 
 // Set mux and IDAC for one RTD connector (differential + excitation)
 static void set_connector_rtd(uint8_t connector_id) {
-  ads126x.setInputMux(getAdcChannel(connector_id, 1), getAdcChannel(connector_id, 2));
+  ADS126X& adc = adc_for_connector(connector_id);
+  adc.setInputMux(getAdcChannel(connector_id, 1), getAdcChannel(connector_id, 2));
   const int idac1 = getIdacChannel(connector_id, 1);
   const int idac2 = getIdacChannel(connector_id, 2);
   if (idac1 >= 0) {
-    ads126x.setIDAC1Pin(static_cast<uint8_t>(idac1));
-    ads126x.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
+    adc.setIDAC1Pin(static_cast<uint8_t>(idac1));
+    adc.setIDAC1Mag(ADS126X_IDAC_MAG_1000);
   }
   if (idac2 >= 0) {
-    ads126x.setIDAC2Pin(static_cast<uint8_t>(idac2));
-    ads126x.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
+    adc.setIDAC2Pin(static_cast<uint8_t>(idac2));
+    adc.setIDAC2Mag(ADS126X_IDAC_MAG_1000);
   }
-}
-
-static void read_single_connector(uint8_t connector_id, int num_readings,
-                                  Diablo::SensorDataChunkCollection& chunk) {
-  uint32_t value = 0;
-  for (int i = 0; i < num_readings; i++) {
-    while (digitalRead(Pins.ADC_DRDY_1) != LOW)
-      delayMicroseconds(10);
-    const auto reading = ads126x.readADC1();
-    if (!reading.checksumValid) continue;
-    value = static_cast<uint32_t>(reading.value);
-  }
-  chunk.add_datapoint(connector_id, value);
 }
 
 static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_CONNECTORS);
-  for (uint8_t connector_id = 1; connector_id <= NUM_CONNECTORS; connector_id++) {
-    set_connector_rtd(connector_id);
-    flush_cycles(settlePulses(FILTER, DATA_RATE));
-    read_single_connector(connector_id, READINGS_PER_CONNECTOR, chunk);
+  const uint8_t active_count = coreState.stored_config.num_sensors;
+  if (active_count == 0) return;
+  const uint8_t* active_ids = coreState.stored_config.sensor_ids;
+
+  Diablo::SensorDataChunkCollection chunk(millis(), active_count);
+  for (uint8_t i = 0; i < active_count; i++) {
+    const uint8_t conn = active_ids[i];
+    set_connector_rtd(conn);
+    const int drdy_pin = drdy_for_connector(conn);
+    ADS126X& adc = adc_for_connector(conn);
+    delayMicroseconds(10);
+    while (digitalRead(drdy_pin) != LOW)
+      delayMicroseconds(10);
+    const auto reading = adc.readADC1();
+    const uint32_t value = reading.checksumValid ? static_cast<uint32_t>(reading.value) : 0u;
+    chunk.add_datapoint(conn, value);
   }
-  if (chunk.size() == NUM_CONNECTORS && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
+  if (chunk.size() == active_count && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -98,8 +103,9 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   if (dataChunks.empty()) return;
   if (dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
+  const uint8_t num_sensors = dataChunks[0].num_sensors;
   size_t packetSize = Diablo::create_sensor_data_packet(
-      dataChunks, static_cast<uint8_t>(NUM_CONNECTORS), packetBuffer, sizeof(packetBuffer));
+      dataChunks, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
   coreState.udp.beginPacket(dest_ip, dest_port);
   coreState.udp.write(packetBuffer, packetSize);
@@ -144,8 +150,41 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
 }
 
 static void init_adc_cb(void*) {
-  ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, Pins.ADC_CS_1);
+  // Deselect both CS pins before anything else so neither chip floats LOW
+  pinMode(Pins.ADC_CS_1, OUTPUT);
+  digitalWrite(Pins.ADC_CS_1, HIGH);
+  pinMode(Pins.ADC_CS_2, OUTPUT);
+  digitalWrite(Pins.ADC_CS_2, HIGH);
+
+  // Drive RESET and START pins for both chips
+  if (Pins.ADC_RESET_1 >= 0) {
+    pinMode(Pins.ADC_RESET_1, OUTPUT);
+    digitalWrite(Pins.ADC_RESET_1, LOW);
+    delay(10);
+    digitalWrite(Pins.ADC_RESET_1, HIGH);
+    delay(10);
+  }
+  if (Pins.ADC_START_1 >= 0) {
+    pinMode(Pins.ADC_START_1, OUTPUT);
+    digitalWrite(Pins.ADC_START_1, HIGH);
+  }
+  if (Pins.ADC_RESET_2 >= 0) {
+    pinMode(Pins.ADC_RESET_2, OUTPUT);
+    digitalWrite(Pins.ADC_RESET_2, LOW);
+    delay(10);
+    digitalWrite(Pins.ADC_RESET_2, HIGH);
+    delay(10);
+  }
+  if (Pins.ADC_START_2 >= 0) {
+    pinMode(Pins.ADC_START_2, OUTPUT);
+    digitalWrite(Pins.ADC_START_2, HIGH);
+  }
+
+  // SPI bus — use -1 for SS so hardware doesn't auto-assert any CS pin
+  ADC_SPI.begin(Pins.ADC_SCLK, Pins.ADC_MISO, Pins.ADC_MOSI, -1);
   ADC_SPI.setDataMode(SPI_MODE1);
+
+  // --- ADC1 (connectors 1 & 2) ---
   pinMode(Pins.ADC_DRDY_1, INPUT);
   ads126x.begin(Pins.ADC_CS_1, &ADC_SPI);
   ads126x.stopADC1();
@@ -155,11 +194,23 @@ static void init_adc_cb(void*) {
   ads126x.setRate(DATA_RATE);
   ads126x.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
   ads126x.startADC1();
+
+  // --- ADC2 (connectors 3 & 4) ---
+  pinMode(Pins.ADC_DRDY_2, INPUT);
+  ads126x_2.begin(Pins.ADC_CS_2, &ADC_SPI);
+  ads126x_2.stopADC1();
+  set_connector_rtd(3);
+  ads126x_2.bypassPGA();
+  ads126x_2.setFilter(FILTER);
+  ads126x_2.setRate(DATA_RATE);
+  ads126x_2.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
+  ads126x_2.startADC1();
 }
 
 static void on_reference_voltage_cb(void*, uint8_t reference_voltage) {
   uint8_t ref_pos = (reference_voltage == 1) ? ADS126X_REF_POS_VDD : ADS126X_REF_POS_INT;
   ads126x.setReference(ADS126X_REF_NEG_VSS, ref_pos);
+  ads126x_2.setReference(ADS126X_REF_NEG_VSS, ref_pos);
 }
 
 static void collect_chunk_cb(void*) { collect_chunk_impl(); }
@@ -179,8 +230,6 @@ void setup() {
 
   coreConfig.board_type = Diablo::BoardType::RTD;
   coreConfig.board_name = "RTD";
-  coreConfig.update_server_on_sensor_config = true;
-  coreConfig.debug_packets = false;
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;

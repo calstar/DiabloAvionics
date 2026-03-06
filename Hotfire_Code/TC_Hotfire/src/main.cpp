@@ -32,6 +32,7 @@ using namespace sense_board_pins;
 //-----------------------------------------------------------------------------
 #define FILTER       ADS126X_SINC4
 #define DATA_RATE    ADS126X_RATE_7200
+ADS126X_ASSERT_FILTER_RATE(FILTER, DATA_RATE);
 #define TEST_PIN     1
 #define NUM_CHANNELS 10
 
@@ -56,21 +57,21 @@ static void flush_cycles(int cycles) {
 }
 
 static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_CHANNELS);
-  for (uint8_t connector_id = 1; connector_id <= NUM_CHANNELS; connector_id++) {
-    ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
-    flush_cycles(settlePulses(FILTER, DATA_RATE));
-    uint32_t value = 0u;
-    for (int r = 0; r < READINGS_PER_CONNECTOR; r++) {
-      while (digitalRead(Pins.ADC_DRDY_1) != LOW)
-        delayMicroseconds(10);
-      const auto reading = ads126x.readADC1();
-      if (reading.checksumValid)
-        value = static_cast<uint32_t>(reading.value);
-    }
-    chunk.add_datapoint(connector_id, value);
+  const uint8_t active_count = coreState.stored_config.num_sensors;
+  if (active_count == 0) return;
+  const uint8_t* active_ids = coreState.stored_config.sensor_ids;
+
+  Diablo::SensorDataChunkCollection chunk(millis(), active_count);
+  for (uint8_t i = 0; i < active_count; i++) {
+    ads126x.setInputMux(getAdcChannel(active_ids[i], TEST_PIN), ADS126X_AINCOM);
+    delayMicroseconds(10);
+    while (digitalRead(Pins.ADC_DRDY_1) != LOW)
+      delayMicroseconds(10);
+    const auto reading = ads126x.readADC1();
+    const uint32_t value = reading.checksumValid ? static_cast<uint32_t>(reading.value) : 0u;
+    chunk.add_datapoint(active_ids[i], value);
   }
-  if (chunk.size() == NUM_CHANNELS && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
+  if (chunk.size() == active_count && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -80,8 +81,9 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   if (dataChunks.empty()) return;
   if (dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
+  const uint8_t num_sensors = dataChunks[0].num_sensors;
   size_t packetSize = Diablo::create_sensor_data_packet(
-      dataChunks, static_cast<uint8_t>(NUM_CHANNELS), packetBuffer, sizeof(packetBuffer));
+      dataChunks, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) {
     SENSOR_HOTFIRE_PRINT("Send FAIL: create_sensor_data_packet returned 0 (n=");
     SENSOR_HOTFIRE_PRINT(dataChunks.size());
@@ -129,23 +131,6 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
     SENSOR_HOTFIRE_PRINT(":");
     SENSOR_HOTFIRE_PRINTLN(abort_controller_port);
   }
-  if (coreConfig.debug_packets) {
-    SENSOR_HOTFIRE_PRINT("Sent sensor data: ");
-    SENSOR_HOTFIRE_PRINT(packetSize);
-    SENSOR_HOTFIRE_PRINT(" bytes, ");
-    SENSOR_HOTFIRE_PRINT(dataChunks.size());
-    SENSOR_HOTFIRE_PRINT(" chunks -> ");
-    SENSOR_HOTFIRE_PRINT(dest_ip);
-    SENSOR_HOTFIRE_PRINT(":");
-    SENSOR_HOTFIRE_PRINT(dest_port);
-    if (also_to_abort_controller) {
-      SENSOR_HOTFIRE_PRINT(" + abort ");
-      SENSOR_HOTFIRE_PRINT(abort_controller_ip);
-      SENSOR_HOTFIRE_PRINT(":");
-      SENSOR_HOTFIRE_PRINT(abort_controller_port);
-    }
-    SENSOR_HOTFIRE_PRINTLN_();
-  }
   dataChunks.clear();
 }
 
@@ -186,8 +171,6 @@ void setup() {
 
   coreConfig.board_type = Diablo::BoardType::THERMOCOUPLE;
   coreConfig.board_name = "TC";
-  coreConfig.update_server_on_sensor_config = true;
-  coreConfig.debug_packets = true;
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;

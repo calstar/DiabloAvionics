@@ -59,13 +59,13 @@ struct StoredSensorConfig {
   uint8_t reference_voltage;   // 0 = internal 2.5V, 1 = VDD, 2 = 5V (ignored; treat as 0)
   bool necessary_for_abort;
   uint32_t actuator_controller_ip;
+  uint8_t num_sensors;                         // 0 = use board default
+  uint8_t sensor_ids[MAX_SENSORS_PER_BOARD];   // connector IDs to read and transmit
 };
 
 struct Config {
   Diablo::BoardType board_type;
   const char* board_name;
-  bool update_server_on_sensor_config;  // if true, set serverIP/serverPort on SENSOR_CONFIG
-  bool debug_packets;
   const sense_board_pins::Layout* pins;
   void (*init_adc)(void* user_data);
   void (*collect_chunk)(void* user_data);
@@ -163,6 +163,10 @@ inline IncomingPacketKind processIncomingPacket(CoreState& s, const Config& cfg,
     s.stored_config.reference_voltage = reference_voltage;
     s.stored_config.necessary_for_abort = necessary_for_abort;
     s.stored_config.actuator_controller_ip = controller_ip;
+    s.stored_config.num_sensors = static_cast<uint8_t>(
+        sensor_ids.size() <= MAX_SENSORS_PER_BOARD ? sensor_ids.size() : MAX_SENSORS_PER_BOARD);
+    for (uint8_t i = 0; i < s.stored_config.num_sensors; ++i)
+      s.stored_config.sensor_ids[i] = sensor_ids[i];
 
     if (cfg.on_reference_voltage_config)
       cfg.on_reference_voltage_config(cfg.user_data, s.stored_config.reference_voltage);
@@ -204,7 +208,7 @@ inline IncomingPacketKind processIncomingPacket(CoreState& s, const Config& cfg,
   if (hdr.packet_type == Diablo::PacketType::CLEAR_ABORT)
     return IncomingPacketKind::ClearAbort;
 
-  if (static_cast<uint8_t>(hdr.packet_type) == SENSOR_HOTFIRE_NO_CONN_ABORT_TYPE) {
+  if (hdr.packet_type == Diablo::PacketType::NO_CONNECTION_ABORT) {
     if (len >= sizeof(Diablo::PacketHeader))
       return IncomingPacketKind::NoConnAbort;
     return IncomingPacketKind::None;
@@ -439,12 +443,13 @@ inline void loop(CoreState& s, const Config& cfg) {
       break;
     case State::StandaloneAbort:
       if (cfg.send_chunks_to) {
-        const uint8_t* ip_bytes =
-            reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
-        IPAddress actuatorIP(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
         bool also_abort = s.stored_config.valid && s.stored_config.actuator_controller_ip != 0;
-        cfg.send_chunks_to(cfg.user_data, s.serverIP, s.serverPort,
-                           also_abort, actuatorIP, s.serverPortDefault);
+        IPAddress actuatorIP(0,0,0,0);
+        if (also_abort) {
+            const uint8_t* ip_bytes = reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
+            actuatorIP = IPAddress(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+        }
+        cfg.send_chunks_to(cfg.user_data, s.serverIP, s.serverPort, also_abort, actuatorIP, s.serverPortDefault);
       }
       break;
   }
@@ -475,13 +480,11 @@ inline void loop(CoreState& s, const Config& cfg) {
         sendBoardHeartbeat(s, cfg, Diablo::BoardState::ACTIVE, s.serverIP, s.serverPort);
         break;
       case State::StandaloneAbort:
-        if (!s.stored_config.valid || s.stored_config.actuator_controller_ip == 0)
-          sendBoardHeartbeat(s, cfg, Diablo::BoardState::ABORT, s.serverIP, s.serverPort);
-        else {
-          const uint8_t* ip_bytes =
-              reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
+        sendBoardHeartbeat(s, cfg, Diablo::BoardState::STANDALONE_ABORT, s.serverIP, s.serverPort);
+        if (s.stored_config.valid && s.stored_config.actuator_controller_ip != 0) {
+          const uint8_t* ip_bytes = reinterpret_cast<const uint8_t*>(&s.stored_config.actuator_controller_ip);
           IPAddress actuatorIP(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-          sendBoardHeartbeat(s, cfg, Diablo::BoardState::ABORT, actuatorIP, s.serverPortDefault);
+          sendBoardHeartbeat(s, cfg, Diablo::BoardState::STANDALONE_ABORT, actuatorIP, s.serverPortDefault);
         }
         break;
     }

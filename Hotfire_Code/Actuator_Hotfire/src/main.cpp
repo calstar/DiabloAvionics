@@ -50,13 +50,12 @@ static bool g_actuator_serial = true;
 enum class ActuatorControllerState {
   WaitingForServer,
   Active,
-  StandardAbort,
   NoConnectionAbort,
   PTAbort,
   NoPTAbort,
   AbortFinished,
   ConnectionLossDetected,
-  StandaloneAbort
+  NoConnAbortFollower
 };
 
 static ActuatorControllerState state = ActuatorControllerState::WaitingForServer;
@@ -86,9 +85,7 @@ static bool pt_abort_abort_done = false;
 static bool no_pt_abort_vent_done = false;
 static bool no_pt_abort_abort_done = false;
 
-// Standalone Abort: vent done, then after 10s abort done (local only)
-static bool standalone_vent_done = false;
-static bool standalone_abort_done = false;
+
 
 // Sensor data
 const uint8_t NUM_SENSORS = NUM_ACTUATORS;
@@ -119,13 +116,12 @@ static uint8_t getStateNumber(ActuatorControllerState s) {
   switch (s) {
     case ActuatorControllerState::WaitingForServer:   return 1;
     case ActuatorControllerState::Active:             return 2;
-    case ActuatorControllerState::StandardAbort:     return 3;
+    case ActuatorControllerState::ConnectionLossDetected: return 3;
     case ActuatorControllerState::NoConnectionAbort: return 4;
-    case ActuatorControllerState::PTAbort:           return 7;
-    case ActuatorControllerState::NoPTAbort:         return 8;
-    case ActuatorControllerState::AbortFinished:     return 10;
-    case ActuatorControllerState::ConnectionLossDetected: return 11;
-    case ActuatorControllerState::StandaloneAbort:   return 9;
+    case ActuatorControllerState::NoConnAbortFollower: return 5;
+    case ActuatorControllerState::PTAbort:           return 6;
+    case ActuatorControllerState::NoPTAbort:         return 7;
+    case ActuatorControllerState::AbortFinished:     return 8;
     default: return 1;
   }
 }
@@ -134,13 +130,12 @@ static const char* stateName(ActuatorControllerState s) {
   switch (s) {
     case ActuatorControllerState::WaitingForServer:   return "WaitingForServer";
     case ActuatorControllerState::Active:             return "Active";
-    case ActuatorControllerState::StandardAbort:     return "StandardAbort";
     case ActuatorControllerState::NoConnectionAbort: return "NoConnectionAbort";
     case ActuatorControllerState::PTAbort:           return "PTAbort";
     case ActuatorControllerState::NoPTAbort:         return "NoPTAbort";
     case ActuatorControllerState::AbortFinished:     return "AbortFinished";
     case ActuatorControllerState::ConnectionLossDetected: return "ConnectionLossDetected";
-    case ActuatorControllerState::StandaloneAbort:   return "StandaloneAbort";
+    case ActuatorControllerState::NoConnAbortFollower: return "NoConnAbortFollower";
     default: return "?";
   }
 }
@@ -209,16 +204,18 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
       return Diablo::BoardState::SETUP;
     case ActuatorControllerState::Active:
       return Diablo::BoardState::ACTIVE;
-    case ActuatorControllerState::StandardAbort:
-    case ActuatorControllerState::NoConnectionAbort:
-    case ActuatorControllerState::PTAbort:
-    case ActuatorControllerState::NoPTAbort:
-    case ActuatorControllerState::StandaloneAbort:
-      return Diablo::BoardState::ABORT;
-    case ActuatorControllerState::AbortFinished:
-      return Diablo::BoardState::ABORT_DONE;
     case ActuatorControllerState::ConnectionLossDetected:
-      return Diablo::BoardState::ACTIVE;
+      return Diablo::BoardState::CONNECTION_LOSS_DETECTED;
+    case ActuatorControllerState::NoConnectionAbort:
+      return Diablo::BoardState::NO_CONNECTION_ABORT;
+    case ActuatorControllerState::NoConnAbortFollower:
+      return Diablo::BoardState::NO_CONN_ABORT_FOLLOWER;
+    case ActuatorControllerState::PTAbort:
+      return Diablo::BoardState::PT_ABORT;
+    case ActuatorControllerState::NoPTAbort:
+      return Diablo::BoardState::NO_PT_ABORT;
+    case ActuatorControllerState::AbortFinished:
+      return Diablo::BoardState::ABORT_FINISHED;
     default:
       return Diablo::BoardState::SETUP;
   }
@@ -275,7 +272,18 @@ static bool isIPInPTLocations(uint32_t ip) {
 static size_t create_no_connection_abort_packet(uint8_t *buffer, size_t buffer_size) {
   if (buffer_size < sizeof(Diablo::PacketHeader)) return 0;
   Diablo::PacketHeader header;
-  header.packet_type = Diablo::PacketType::ABORT;
+  header.packet_type = Diablo::PacketType::NO_CONNECTION_ABORT;
+  header.version = 1;
+  header.timestamp = millis();
+  memcpy(buffer, &header, sizeof(header));
+  return sizeof(header);
+}
+
+// ABORT_DONE: header-only packet sent to PTs and generic actuators to signify abort completion
+static size_t create_abort_done_packet(uint8_t *buffer, size_t buffer_size) {
+  if (buffer_size < sizeof(Diablo::PacketHeader)) return 0;
+  Diablo::PacketHeader header;
+  header.packet_type = Diablo::PacketType::ABORT_DONE;
   header.version = 1;
   header.timestamp = millis();
   memcpy(buffer, &header, sizeof(header));
@@ -379,22 +387,48 @@ enum class IncomingPacketKind {
   Abort,
   AbortDone,
   ClearAbort,
-  SensorData
+  SensorData,
+  NoConnAbort
 };
 
 static void processActuatorCommands(const std::vector<Diablo::ActuatorCommand> &commands);
 static void processPWMActuatorCommand(const std::vector<Diablo::PWMActuatorCommand> &commands);
 
-// Designated survivor: accept ACTUATOR_COMMAND in NoConnectionAbort, PTAbort, NoPTAbort (and optionally StandaloneAbort)
-static bool stateAcceptsActuatorCommand() {
-  if (state == ActuatorControllerState::Active || state == ActuatorControllerState::StandardAbort)
-    return true;
-  if (!is_abort_controller &&
-      (state == ActuatorControllerState::NoConnectionAbort ||
-       state == ActuatorControllerState::PTAbort ||
-       state == ActuatorControllerState::NoPTAbort ||
-       state == ActuatorControllerState::StandaloneAbort))
-    return true;
+static bool stateAcceptsActuatorCommand(uint32_t remote_ip32) {
+  uint32_t sip = (static_cast<uint32_t>(serverIP[0]) << 24) |
+                 (static_cast<uint32_t>(serverIP[1]) << 16) |
+                 (static_cast<uint32_t>(serverIP[2]) << 8) |
+                 static_cast<uint32_t>(serverIP[3]);
+
+  // All boards unconditionally ignore server commands when in AbortFinished or NoConnAbortFollower
+  if ((state == ActuatorControllerState::AbortFinished || 
+       state == ActuatorControllerState::NoConnAbortFollower) && 
+      remote_ip32 == sip) {
+    return false;
+  }
+
+  // Accept commands unconditionally if Active
+  if (state == ActuatorControllerState::Active) return true;
+
+  // The designated survivor accepts commands from the server during its abort sequences
+  if (is_abort_controller) {
+    if (state == ActuatorControllerState::NoConnectionAbort ||
+        state == ActuatorControllerState::PTAbort ||
+        state == ActuatorControllerState::NoPTAbort ||
+        state == ActuatorControllerState::AbortFinished) {
+      return true;
+    }
+  } else {
+    // Generic boards accept commands from non-server IPs (i.e. the designated survivor) during aborts
+    if (state == ActuatorControllerState::NoConnAbortFollower ||
+        state == ActuatorControllerState::NoConnectionAbort ||
+        state == ActuatorControllerState::PTAbort ||
+        state == ActuatorControllerState::NoPTAbort ||
+        state == ActuatorControllerState::AbortFinished) {
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -473,17 +507,19 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
       }
       return IncomingPacketKind::SensorData;
     }
+    case Diablo::PacketType::NO_CONNECTION_ABORT:
+      return IncomingPacketKind::NoConnAbort;
     case Diablo::PacketType::ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::ActuatorCommand> commands;
-      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand())
+      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
         processActuatorCommands(commands);
       return IncomingPacketKind::None;
     }
     case Diablo::PacketType::PWM_ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::PWMActuatorCommand> commands;
-      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand())
+      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
         processPWMActuatorCommand(commands);
       return IncomingPacketKind::None;
     }
@@ -615,6 +651,33 @@ static void sendNoConnectionAbortToAllPTs() {
 }
 
 //-----------------------------------------------------------------------------
+// Broadcast ABORT_DONE to all boards (PTs and Actuators)
+//-----------------------------------------------------------------------------
+static void sendAbortDoneToAllBoards() {
+  uint8_t packetBuffer[MAX_PACKET_SIZE];
+  size_t len = create_abort_done_packet(packetBuffer, sizeof(packetBuffer));
+  if (len == 0) return;
+
+  ACTUATOR_PRINTLN("Broadcasting ABORT_DONE to network...");
+
+  // Broadcast to all PTs
+  for (const auto &loc : abort_pt_locations) {
+    udp.beginPacket(uint32ToIPAddress(loc.ip_address), ptBoardPort);
+    udp.write(packetBuffer, len);
+    udp.endPacket();
+  }
+
+  // Broadcast to all actuator boards (excluding self)
+  const uint32_t self_ip = getSelfIP();
+  for (const auto &loc : abort_actuator_locations) {
+    if (loc.ip_address == self_ip) continue;
+    udp.beginPacket(uint32ToIPAddress(loc.ip_address), udpListenPort);
+    udp.write(packetBuffer, len);
+    udp.endPacket();
+  }
+}
+
+//-----------------------------------------------------------------------------
 // State handlers
 //-----------------------------------------------------------------------------
 static void run_WaitingForServer() {
@@ -629,20 +692,16 @@ static void run_Active() {
   }
 }
 
-static void run_StandardAbort() {
-  if (heartbeatTimedOut()) {
-    setState(ActuatorControllerState::NoConnectionAbort);
-    no_conn_abort_vent_sent = false;
-    no_conn_abort_pt_sent = false;
-    pt_received_during_no_conn.clear();
-    pt_received_during_no_conn.resize(abort_pt_locations.size(), false);
-  }
-}
-
 static void run_NoConnectionAbort() {
   if (is_abort_controller && config_valid) {
     if (!no_conn_abort_pt_sent) {
+      // Broadcast NO_CONNECTION_ABORT to PTs 3 times
       sendNoConnectionAbortToAllPTs();
+      delay(10);
+      sendNoConnectionAbortToAllPTs();
+      delay(10);
+      sendNoConnectionAbortToAllPTs();
+      
       no_conn_abort_pt_sent = true;
     }
     if (!no_conn_abort_vent_sent && !abort_actuator_locations.empty()) {
@@ -686,6 +745,7 @@ static void run_PTAbort() {
     unsigned long elapsed = millis() - state_enter_ms;
     if (all_below || elapsed >= PT_ABORT_THRESHOLD_TIMEOUT_MS) {
       applyAbortToAllActuators();
+      sendAbortDoneToAllBoards();
       pt_abort_abort_done = true;
       setState(ActuatorControllerState::AbortFinished);
     }
@@ -700,6 +760,7 @@ static void run_NoPTAbort() {
   if (no_pt_abort_vent_done && !no_pt_abort_abort_done) {
     if ((millis() - state_enter_ms) >= NO_PT_ABORT_VENT_TO_ABORT_MS) {
       applyAbortToAllActuators();
+      sendAbortDoneToAllBoards();
       no_pt_abort_abort_done = true;
       setState(ActuatorControllerState::AbortFinished);
     }
@@ -715,48 +776,36 @@ static void run_ConnectionLossDetected() {
     setState(ActuatorControllerState::Active);
     return;
   }
-  if ((millis() - state_enter_ms) < CONNECTION_LOSS_GRACE_MS)
-    return;
-
-  uint32_t self_ip = getSelfIP();
-  std::set<uint32_t> abort_ips;
-  for (const auto &loc : abort_actuator_locations)
-    if (loc.ip_address != self_ip) abort_ips.insert(loc.ip_address);
-  for (const auto &loc : abort_pt_locations)
-    if (loc.ip_address != self_ip) abort_ips.insert(loc.ip_address);
-
-  bool all_reached = true;
-  for (uint32_t ip : abort_ips)
-    if (connection_loss_received_ips.find(ip) == connection_loss_received_ips.end()) { all_reached = false; break; }
-
-  if (all_reached && !abort_ips.empty()) {
-    setState(ActuatorControllerState::NoConnectionAbort);
-    no_conn_abort_vent_sent = false;
-    no_conn_abort_pt_sent = false;
-    pt_received_during_no_conn.resize(abort_pt_locations.size(), false);
-  } else {
-    setState(ActuatorControllerState::StandaloneAbort);
+  
+  if ((millis() - state_enter_ms) >= CONNECTION_LOSS_GRACE_MS) {
+    if (is_abort_controller) {
+      setState(ActuatorControllerState::NoConnectionAbort);
+      no_conn_abort_vent_sent = false;
+      no_conn_abort_pt_sent = false;
+      pt_received_during_no_conn.clear();
+      pt_received_during_no_conn.resize(abort_pt_locations.size(), false);
+    } else {
+      setState(ActuatorControllerState::NoConnAbortFollower);
+    }
   }
 }
 
-static void run_StandaloneAbort() {
-  if (!standalone_vent_done && config_valid) {
-    applyVentLocalOnly();
-    standalone_vent_done = true;
-  }
-  if (standalone_vent_done && !standalone_abort_done) {
-    if ((millis() - state_enter_ms) >= STANDALONE_ABORT_VENT_TO_ABORT_MS) {
-      applyAbortLocalOnly();
-      standalone_abort_done = true;
-      setState(ActuatorControllerState::AbortFinished);
-    }
-  }
+static void run_NoConnAbortFollower() {
+  (void)0; // Passive state; awaits UDP commands from designated survivor
 }
 
 //-----------------------------------------------------------------------------
 // Packet-driven transitions
 //-----------------------------------------------------------------------------
 static void applyPacketTransition(IncomingPacketKind kind) {
+  // Global Clear Abort recovery
+  if (kind == IncomingPacketKind::ClearAbort) {
+     if (state == ActuatorControllerState::AbortFinished) {
+       setState(ActuatorControllerState::Active);
+       return;
+     }
+  }
+
   switch (state) {
     case ActuatorControllerState::WaitingForServer:
       if (kind == IncomingPacketKind::Config) {
@@ -764,18 +813,10 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case ActuatorControllerState::Active:
-      if (kind == IncomingPacketKind::Abort) {
-        setState(ActuatorControllerState::StandardAbort);
-      }
-      break;
-    case ActuatorControllerState::StandardAbort:
-      if (kind == IncomingPacketKind::AbortDone) {
+      if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
         setState(ActuatorControllerState::AbortFinished);
-      }
-      break;
-    case ActuatorControllerState::AbortFinished:
-      if (kind == IncomingPacketKind::ClearAbort) {
-        setState(ActuatorControllerState::Active);
+      } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
+        setState(ActuatorControllerState::NoConnAbortFollower);
       }
       break;
     case ActuatorControllerState::ConnectionLossDetected:
@@ -916,9 +957,6 @@ void loop() {
     case ActuatorControllerState::Active:
       run_Active();
       break;
-    case ActuatorControllerState::StandardAbort:
-      run_StandardAbort();
-      break;
     case ActuatorControllerState::NoConnectionAbort:
       run_NoConnectionAbort();
       break;
@@ -934,8 +972,8 @@ void loop() {
     case ActuatorControllerState::ConnectionLossDetected:
       run_ConnectionLossDetected();
       break;
-    case ActuatorControllerState::StandaloneAbort:
-      run_StandaloneAbort();
+    case ActuatorControllerState::NoConnAbortFollower:
+      run_NoConnAbortFollower();
       break;
   }
 

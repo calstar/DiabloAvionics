@@ -18,7 +18,7 @@
 
 // RTD board: cycle connectors 1 and 2 only. Each connector is differential (pin 1 vs pin 2) with IDAC excitation.
 #define NUM_CONNECTORS 2
-#define MAX_CHUNKS_PER_PACKET 10
+#define MAX_CHUNKS_PER_PACKET 8 
 
 using namespace sense_board_pins;
 

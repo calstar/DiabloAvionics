@@ -18,19 +18,23 @@
 
 #include "main.h"
 #include "STAR_ADS126X.h"
+
+// MUST be defined before sense_board_pins.h / connector_adc_map.h
+#define PINS_ACTIVE_LAYOUT sense_board_pins::PT_Board
+
 #include "sense_board_pins.h"
 #include "connector_adc_map.h"
 #include "adc_mappings.h"
 #include "SensorHotfireCore.h"
 
-#define PINS_ACTIVE_LAYOUT sense_board_pins::PT_Board
 using namespace sense_board_pins;
 
 //-----------------------------------------------------------------------------
 // ADC config (Stream_ADC_Data / PT_BOARD_Multi style)
 //-----------------------------------------------------------------------------
-#define FILTER       ADS126X_SINC4
-#define DATA_RATE    ADS126X_RATE_7200
+#define FILTER       ADS126X_SINC5
+#define DATA_RATE    ADS126X_RATE_38400
+ADS126X_ASSERT_FILTER_RATE(FILTER, DATA_RATE);
 #define TEST_PIN     1
 
 static ADS126X ads126x;
@@ -57,27 +61,22 @@ static void flush_cycles(int cycles) {
   }
 }
 
-static void read_single_connector(uint8_t connector_id, int num_readings,
-                                  Diablo::SensorDataChunkCollection& chunk) {
-  uint32_t value = 0;
-  for (int i = 0; i < num_readings; i++) {
+static void collect_chunk_impl() {
+  const uint8_t active_count = coreState.stored_config.num_sensors;
+  if (active_count == 0) return;
+  const uint8_t* active_ids = coreState.stored_config.sensor_ids;
+
+  Diablo::SensorDataChunkCollection chunk(millis(), active_count);
+  for (uint8_t i = 0; i < active_count; i++) {
+    ads126x.setInputMux(getAdcChannel(active_ids[i], TEST_PIN), ADS126X_AINCOM);
+    delayMicroseconds(10);
     while (digitalRead(Pins.ADC_DRDY_1) != LOW)
       delayMicroseconds(10);
     const auto reading = ads126x.readADC1();
-    if (!reading.checksumValid) continue;
-    value = static_cast<uint32_t>(reading.value);
+    const uint32_t value = reading.checksumValid ? static_cast<uint32_t>(reading.value) : 0u;
+    chunk.add_datapoint(active_ids[i], value);
   }
-  chunk.add_datapoint(connector_id, value);
-}
-
-static void collect_chunk_impl() {
-  Diablo::SensorDataChunkCollection chunk(millis(), NUM_PTS);
-  for (uint8_t connector_id = 1; connector_id <= NUM_PTS; connector_id++) {
-    ads126x.setInputMux(getAdcChannel(connector_id, TEST_PIN), ADS126X_AINCOM);
-    flush_cycles(settlePulses(FILTER, DATA_RATE));
-    read_single_connector(connector_id, READINGS_PER_MUX, chunk);
-  }
-  if (chunk.size() == NUM_PTS && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
+  if (chunk.size() == active_count && dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND)
     dataChunks.push_back(chunk);
 }
 
@@ -87,8 +86,9 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   if (dataChunks.empty()) return;
   if (dataChunks.size() < SENSOR_MAX_CHUNKS_BEFORE_SEND) return;
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
+  const uint8_t num_sensors = dataChunks[0].num_sensors;
   size_t packetSize = Diablo::create_sensor_data_packet(
-      dataChunks, static_cast<uint8_t>(NUM_PTS), packetBuffer, sizeof(packetBuffer));
+      dataChunks, num_sensors, packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
   coreState.udp.beginPacket(dest_ip, dest_port);
   coreState.udp.write(packetBuffer, packetSize);
@@ -169,8 +169,6 @@ void setup() {
 
   coreConfig.board_type = Diablo::BoardType::PRESSURE_TRANSDUCER;
   coreConfig.board_name = "PT";
-  coreConfig.update_server_on_sensor_config = false;
-  coreConfig.debug_packets = false;
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;
