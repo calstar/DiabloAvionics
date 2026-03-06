@@ -43,7 +43,8 @@ namespace SensorHotfire {
 enum class State : uint8_t {
   WaitingForServer = 0,
   Active = 1,
-  StandaloneAbort = 2
+  StandaloneAbort = 2,
+  SelfTest = 3
 };
 
 enum class IncomingPacketKind {
@@ -74,6 +75,14 @@ struct Config {
                          bool also_to_abort_controller, IPAddress abort_controller_ip, int abort_controller_port);
   /** Called when SENSOR_CONFIG is received with reference_voltage byte (0=2.5V internal, 1=VDD, 2=ignore). */
   void (*on_reference_voltage_config)(void* user_data, uint8_t reference_voltage);
+  /**
+   * Called once when entering SelfTest state.
+   * Performs ADC self-test and connector continuity check, fills `results_out`.
+   * After return, core sends the SELF_TEST packet and goes to Active.
+   */
+  void (*run_self_test)(void* user_data,
+                        const StoredSensorConfig& config,
+                        std::vector<Diablo::SelfTestResult>& results_out);
   void* user_data;
 };
 
@@ -120,6 +129,7 @@ inline const char* packetTypeName(uint8_t type) {
     case 9:  return "CLEAR_ABORT";
     case 10: return "PWM_ACTUATOR_COMMAND";
     case SENSOR_HOTFIRE_NO_CONN_ABORT_TYPE: return "NO_CONNECTION_ABORT";
+    case 12: return "SELF_TEST";
     default: return "UNKNOWN";
   }
 }
@@ -216,12 +226,17 @@ inline IncomingPacketKind processIncomingPacket(CoreState& s, const Config& cfg,
   return IncomingPacketKind::None;
 }
 
-inline void applyPacketTransition(CoreState& s, IncomingPacketKind kind) {
+inline void applyPacketTransition(CoreState& s, const Config& cfg, IncomingPacketKind kind) {
   switch (s.state) {
     case State::WaitingForServer:
       if (kind == IncomingPacketKind::SensorConfig) {
-        s.state = State::Active;
-        Serial.println("State -> Active");
+        if (cfg.run_self_test) {
+          s.state = State::SelfTest;
+          Serial.println("State -> SelfTest");
+        } else {
+          s.state = State::Active;
+          Serial.println("State -> Active");
+        }
         Serial.flush();
       }
       break;
@@ -238,6 +253,9 @@ inline void applyPacketTransition(CoreState& s, IncomingPacketKind kind) {
         Serial.println("State -> Active");
         Serial.flush();
       }
+      break;
+    case State::SelfTest:
+      // State handled in loop(), it's a transient state returning to Active
       break;
   }
 }
@@ -265,7 +283,7 @@ inline void sendBoardHeartbeat(CoreState& s, const Config& cfg,
 
 inline void updateStateLed(CoreState& s, const Config& cfg, int state_num) {
   if (state_num < 1) state_num = 1;
-  if (state_num > 3) state_num = 3;
+  if (state_num > 4) state_num = 4;
   const int led_pin = cfg.pins->LED;
   unsigned long now = millis();
   const unsigned long STATE_LED_CYCLE_MS = 2500;
@@ -416,7 +434,7 @@ inline void loop(CoreState& s, const Config& cfg) {
       Serial.flush();
       IncomingPacketKind kind = processIncomingPacket(s, cfg, packetBuffer, bytesRead, remoteIP, remotePort);
       if (kind == IncomingPacketKind::SensorConfig) {
-        Serial.println("SENSOR_CONFIG parsed -> transitioning to Active");
+        Serial.println("SENSOR_CONFIG parsed -> transitioning");
         Serial.flush();
       } else if (static_cast<uint8_t>(packetBuffer[0]) == 6) {
         Serial.println("(Packet type 6 = ACTUATOR_CONFIG; PT expects SENSOR_CONFIG type 5)");
@@ -425,13 +443,36 @@ inline void loop(CoreState& s, const Config& cfg) {
         Serial.println("(Type 5 received but parse failed - check header/length)");
         Serial.flush();
       }
-      applyPacketTransition(s, kind);
+      applyPacketTransition(s, cfg, kind);
     }
   }
 
   if (s.state == State::Active || s.state == State::StandaloneAbort) {
     if (cfg.collect_chunk)
       cfg.collect_chunk(cfg.user_data);
+  } else if (s.state == State::SelfTest) {
+    // Blocking self text execution
+    if (cfg.run_self_test) {
+      std::vector<Diablo::SelfTestResult> results;
+      cfg.run_self_test(cfg.user_data, s.stored_config, results);
+
+      // Create and send packet
+      uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
+      size_t packetSize = Diablo::create_self_test_packet(results, packetBuffer, sizeof(packetBuffer));
+      if (packetSize > 0) {
+        s.udp.beginPacket(s.serverIP, s.serverPort);
+        s.udp.write(packetBuffer, packetSize);
+        s.udp.endPacket();
+        SENSOR_HOTFIRE_PRINT("Sent: SELF_TEST to ");
+        SENSOR_HOTFIRE_PRINT(s.serverIP);
+        SENSOR_HOTFIRE_PRINT(":");
+        SENSOR_HOTFIRE_PRINTLN(s.serverPort);
+      }
+    }
+    // Automatically transition to Active after test
+    s.state = State::Active;
+    Serial.println("State -> Active");
+    Serial.flush();
   }
 
   switch (s.state) {
@@ -452,9 +493,13 @@ inline void loop(CoreState& s, const Config& cfg) {
         cfg.send_chunks_to(cfg.user_data, s.serverIP, s.serverPort, also_abort, actuatorIP, s.serverPortDefault);
       }
       break;
+    case State::SelfTest:
+      break;
   }
 
-  int state_num = (s.state == State::WaitingForServer) ? 1 : (s.state == State::Active) ? 2 : 3;
+  int state_num = (s.state == State::WaitingForServer) ? 1 : 
+                  (s.state == State::Active)           ? 2 : 
+                  (s.state == State::StandaloneAbort)  ? 3 : 4; // SelfTest = 4 blinks
   updateStateLed(s, cfg, state_num);
 
   unsigned long now = millis();
@@ -478,6 +523,9 @@ inline void loop(CoreState& s, const Config& cfg) {
         break;
       case State::Active:
         sendBoardHeartbeat(s, cfg, Diablo::BoardState::ACTIVE, s.serverIP, s.serverPort);
+        break;
+      case State::SelfTest:
+        sendBoardHeartbeat(s, cfg, Diablo::BoardState::SELF_TEST, s.serverIP, s.serverPort);
         break;
       case State::StandaloneAbort:
         sendBoardHeartbeat(s, cfg, Diablo::BoardState::STANDALONE_ABORT, s.serverIP, s.serverPort);

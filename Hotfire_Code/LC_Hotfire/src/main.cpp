@@ -25,6 +25,7 @@
 #include "connector_adc_map.h"
 #include "adc_mappings.h"
 #include "SensorHotfireCore.h"
+#include "SensorSelfTest.h"
 
 using namespace sense_board_pins;
 
@@ -171,6 +172,33 @@ static void send_chunks_to_cb(void*, IPAddress dest_ip, int dest_port,
                         abort_controller_ip, abort_controller_port);
 }
 
+static void run_self_test_cb(void*,
+    const SensorHotfire::StoredSensorConfig& cfg,
+    std::vector<Diablo::SelfTestResult>& results_out) {
+
+  // 1. ADC self-test (TDAC internal)
+  bool adc_ok = SensorSelfTest::run_adc_self_test(
+      ads126x, Pins.ADC_DRDY_1,
+      ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
+  results_out.push_back({0, adc_ok ? 1u : 0u});
+
+  // 2. Sensor bias continuity test
+  SensorSelfTest::sensor_bias_enable(ads126x);
+  for (uint8_t i = 0; i < cfg.num_sensors; i++) {
+    uint8_t id = cfg.sensor_ids[i];
+    int ch1 = getAdcChannel(id, 1);
+    int ch2 = getAdcChannel(id, 2);
+    if (ch1 < 0 || ch2 < 0) continue;
+    
+    // For LC boards, sensor bias test is performed differentially across the two input pins
+    bool ok = SensorSelfTest::read_sensor_bias(
+        ads126x, Pins.ADC_DRDY_1,
+        static_cast<uint8_t>(ch1), static_cast<uint8_t>(ch2));
+    results_out.push_back({id, ok ? 1u : 0u});
+  }
+  SensorSelfTest::sensor_bias_disable(ads126x);
+}
+
 void setup() {
   memset(&coreState, 0, sizeof(coreState));
   coreState.gateway = IPAddress(0, 0, 0, 0);
@@ -183,6 +211,7 @@ void setup() {
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
+  coreConfig.run_self_test = run_self_test_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
   coreConfig.user_data = nullptr;
 
