@@ -686,7 +686,8 @@ static void run_WaitingForServer() {
 
 static void run_Active() {
   streamSensorDataIfDue();
-  if (heartbeatTimedOut()) {
+  // Stay in Active: no transition on connection loss (code kept but unreachable).
+  if (false && heartbeatTimedOut()) {
     setState(ActuatorControllerState::ConnectionLossDetected);
     connection_loss_received_ips.clear();
   }
@@ -813,10 +814,13 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case ActuatorControllerState::Active:
-      if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
-        setState(ActuatorControllerState::AbortFinished);
-      } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
-        setState(ActuatorControllerState::NoConnAbortFollower);
+      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (code kept but unreachable).
+      if (false) {
+        if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
+          setState(ActuatorControllerState::AbortFinished);
+        } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
+          setState(ActuatorControllerState::NoConnAbortFollower);
+        }
       }
       break;
     case ActuatorControllerState::ConnectionLossDetected:
