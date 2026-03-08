@@ -432,6 +432,14 @@ static bool stateAcceptsActuatorCommand(uint32_t remote_ip32) {
   return false;
 }
 
+static const char* actuatorPacketTypeName(uint8_t type) {
+  switch (type) {
+    case 4:  return "ACTUATOR_COMMAND";
+    case 10: return "PWM_ACTUATOR_COMMAND";
+    default: return "UNKNOWN";
+  }
+}
+
 static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t len, IPAddress remoteIP) {
   Diablo::PacketHeader hdr;
   if (!readPacketHeader(buffer, len, hdr)) return IncomingPacketKind::None;
@@ -512,15 +520,45 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
     case Diablo::PacketType::ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::ActuatorCommand> commands;
-      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
-        processActuatorCommands(commands);
+      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands)) {
+        ACTUATOR_PRINTLN("ACTUATOR_COMMAND received (DAQv2-Comms):");
+        for (size_t i = 0; i < commands.size(); ++i) {
+          const auto& cmd = commands[i];
+          ACTUATOR_PRINT("  [");
+          ACTUATOR_PRINT(static_cast<unsigned>(i));
+          ACTUATOR_PRINT("] actuator_id=");
+          ACTUATOR_PRINT(static_cast<unsigned>(cmd.actuator_id));
+          ACTUATOR_PRINT(" actuator_state=");
+          ACTUATOR_PRINTLN(static_cast<unsigned>(cmd.actuator_state));
+        }
+        Serial.flush();
+        if (stateAcceptsActuatorCommand(remote_ip32))
+          processActuatorCommands(commands);
+      }
       return IncomingPacketKind::None;
     }
     case Diablo::PacketType::PWM_ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::PWMActuatorCommand> commands;
-      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
-        processPWMActuatorCommand(commands);
+      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands)) {
+        ACTUATOR_PRINTLN("PWM_ACTUATOR_COMMAND received (DAQv2-Comms):");
+        for (size_t i = 0; i < commands.size(); ++i) {
+          const auto& cmd = commands[i];
+          ACTUATOR_PRINT("  [");
+          ACTUATOR_PRINT(static_cast<unsigned>(i));
+          ACTUATOR_PRINT("] actuator_id=");
+          ACTUATOR_PRINT(static_cast<unsigned>(cmd.actuator_id));
+          ACTUATOR_PRINT(" duration_ms=");
+          ACTUATOR_PRINT(cmd.duration);
+          ACTUATOR_PRINT(" duty_cycle=");
+          ACTUATOR_PRINT(cmd.duty_cycle);
+          ACTUATOR_PRINT(" frequency=");
+          ACTUATOR_PRINTLN(cmd.frequency);
+        }
+        Serial.flush();
+        if (stateAcceptsActuatorCommand(remote_ip32))
+          processPWMActuatorCommand(commands);
+      }
       return IncomingPacketKind::None;
     }
     default:
@@ -937,12 +975,26 @@ void loop() {
     uint8_t packetBuffer[MAX_PACKET_SIZE];
     int bytesRead = udp.read(packetBuffer, sizeof(packetBuffer));
     if (bytesRead > 0) {
-      Serial.print("Received packet from ");
-      Serial.print(remoteIP);
-      Serial.print(":");
-      Serial.print(udp.remotePort());
-      Serial.print(" type ");
-      Serial.println(bytesRead >= (int)sizeof(Diablo::PacketHeader) ? (unsigned)packetBuffer[0] : 0);
+      const uint8_t pktType = bytesRead >= (int)sizeof(Diablo::PacketHeader) ? packetBuffer[0] : 0;
+      ACTUATOR_PRINT("Received packet from ");
+      ACTUATOR_PRINT(remoteIP);
+      ACTUATOR_PRINT(":");
+      ACTUATOR_PRINT(udp.remotePort());
+      ACTUATOR_PRINT(" type ");
+      ACTUATOR_PRINT(static_cast<unsigned>(pktType));
+      if (pktType == 4 || pktType == 10) {
+        ACTUATOR_PRINT(" (");
+        ACTUATOR_PRINT(actuatorPacketTypeName(pktType));
+        ACTUATOR_PRINT(") len=");
+        ACTUATOR_PRINT(bytesRead);
+        ACTUATOR_PRINT(" hex:");
+        for (int i = 0; i < bytesRead && i < 32; i++) {
+          ACTUATOR_PRINT(" ");
+          if (packetBuffer[i] < 16) ACTUATOR_PRINT("0");
+          if (g_actuator_serial) Serial.print(packetBuffer[i], HEX);
+        }
+      }
+      ACTUATOR_PRINTLN("");
       Serial.flush();
       connection_loss_received_ips.insert(
         static_cast<uint32_t>(remoteIP[0]) << 24 |

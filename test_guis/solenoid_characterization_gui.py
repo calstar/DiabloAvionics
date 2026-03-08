@@ -70,8 +70,8 @@ class PacketType:
     NO_CONNECTION_ABORT = 11
 
 
-DEFAULT_SENSOR_IP = '192.168.2.101'
-DEFAULT_ACTUATOR_IP = '192.168.2.201'
+DEFAULT_SENSOR_IP = '192.168.2.21'
+DEFAULT_ACTUATOR_IP = '192.168.2.12'
 DEFAULT_DEVICE_PORT = 5005
 DEFAULT_RECEIVE_PORT = 5006
 
@@ -1159,6 +1159,20 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
         self.actuator_combo.currentIndexChanged.connect(self._on_actuator_changed)
         top.addWidget(self.actuator_combo)
 
+        top.addWidget(QtWidgets.QLabel("Receive IP:"))
+        self.receive_ip_edit = QtWidgets.QLineEdit(self.filter_source_ip)
+        self.receive_ip_edit.setFixedWidth(120)
+        self.receive_ip_edit.setToolTip("IP address to accept sensor data from")
+        self.receive_ip_edit.editingFinished.connect(self._on_receive_ip_changed)
+        top.addWidget(self.receive_ip_edit)
+
+        top.addWidget(QtWidgets.QLabel("Send IP:"))
+        self.send_ip_edit = QtWidgets.QLineEdit(self.device_ip)
+        self.send_ip_edit.setFixedWidth(120)
+        self.send_ip_edit.setToolTip("IP address to send actuator commands to")
+        self.send_ip_edit.editingFinished.connect(self._on_send_ip_changed)
+        top.addWidget(self.send_ip_edit)
+
         self.status_label = QtWidgets.QLabel("Starting...")
         self.status_label.setStyleSheet("font-weight: bold; padding: 5px;")
         top.addWidget(self.status_label)
@@ -1294,6 +1308,18 @@ class SolenoidCharacterizationWindow(QtWidgets.QMainWindow):
 
     def _on_actuator_changed(self, index: int):
         pass
+
+    def _on_receive_ip_changed(self):
+        new_ip = self.receive_ip_edit.text().strip()
+        if new_ip and new_ip != self.filter_source_ip:
+            self.filter_source_ip = new_ip
+            self.status_label.setText(f"Receive IP → {new_ip}")
+
+    def _on_send_ip_changed(self):
+        new_ip = self.send_ip_edit.text().strip()
+        if new_ip and new_ip != self.device_ip:
+            self.device_ip = new_ip
+            self.status_label.setText(f"Send IP → {new_ip}")
 
     def _on_window_slider_changed(self, value: int):
         self.window_seconds = float(value)
