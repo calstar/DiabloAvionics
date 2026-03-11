@@ -98,7 +98,11 @@ struct PWMState {
   bool active;
   unsigned long start_time;
   uint32_t duration;
-  uint8_t channel;
+  float duty_cycle;
+  uint32_t period_micros;
+  uint32_t on_time_micros;
+  unsigned long last_cycle_start_micros;
+  bool current_pin_state;
 };
 static PWMState pwm_states[NUM_ACTUATORS];
 
@@ -571,11 +575,6 @@ static void processActuatorCommands(const std::vector<Diablo::ActuatorCommand> &
     if (cmd.actuator_id < 1 || cmd.actuator_id > NUM_ACTUATORS) continue;
     uint8_t idx = cmd.actuator_id - 1;
     if (pwm_states[idx].active) {
-      int pin = getActuatorPin(cmd.actuator_id);
-      if (pin >= 0) {
-        ledcWrite(pwm_states[idx].channel, 0);
-        ledcDetachPin(pin);
-      }
       pwm_states[idx].active = false;
     }
     int pin = getActuatorPin(cmd.actuator_id);
@@ -594,34 +593,60 @@ static void processPWMActuatorCommand(const std::vector<Diablo::PWMActuatorComma
     int pin = getActuatorPin(cmd.actuator_id);
     if (pin < 0) continue;
     uint8_t array_index = cmd.actuator_id - 1;
-    uint8_t channel = pwm_states[array_index].channel;
-    if (channel > 7) continue;
-    ledcSetup(channel, cmd.frequency, 14);
-    ledcAttachPin(pin, channel);
-    uint32_t max_duty = 16383;
-    uint32_t duty = (uint32_t)(cmd.duty_cycle * (float)max_duty);
-    if (duty > max_duty) duty = max_duty;
-    ledcWrite(channel, duty);
+    
+    uint32_t period_us = (cmd.frequency > 0) ? (1000000 / cmd.frequency) : 0;
+    uint32_t on_time_us = (uint32_t)(cmd.duty_cycle * (float)period_us);
+
     pwm_states[array_index].active = true;
     pwm_states[array_index].start_time = millis();
     pwm_states[array_index].duration = cmd.duration;
-    actuator_states[array_index] = (duty > 0) ? 1 : 0;
+    pwm_states[array_index].duty_cycle = cmd.duty_cycle;
+    pwm_states[array_index].period_micros = period_us;
+    pwm_states[array_index].on_time_micros = on_time_us;
+    pwm_states[array_index].last_cycle_start_micros = micros();
+    
+    bool initial_state = (cmd.duty_cycle > 0.0f);
+    pwm_states[array_index].current_pin_state = initial_state;
+    digitalWrite(pin, initial_state ? HIGH : LOW);
+
+    actuator_states[array_index] = initial_state ? 1 : 0;
   }
 }
 
 static void updatePWM() {
-  unsigned long now = millis();
+  unsigned long now_ms = millis();
+  unsigned long now_us = micros();
   for (int i = 0; i < NUM_ACTUATORS; i++) {
     if (!pwm_states[i].active) continue;
-    if (now - pwm_states[i].start_time >= pwm_states[i].duration) {
-      int pin = getActuatorPin(i + 1);
-      if (pin >= 0) {
-        ledcWrite(pwm_states[i].channel, 0);
-        ledcDetachPin(pin);
-        digitalWrite(pin, LOW);
-      }
+    int pin = getActuatorPin(i + 1);
+    if (pin < 0) continue;
+
+    if (now_ms - pwm_states[i].start_time >= pwm_states[i].duration) {
+      digitalWrite(pin, LOW);
       pwm_states[i].active = false;
       actuator_states[i] = 0;
+      continue;
+    }
+
+    if (pwm_states[i].period_micros > 0) {
+      unsigned long elapsed_in_cycle = now_us - pwm_states[i].last_cycle_start_micros;
+      
+      if (elapsed_in_cycle >= pwm_states[i].period_micros) {
+        pwm_states[i].last_cycle_start_micros += (elapsed_in_cycle / pwm_states[i].period_micros) * pwm_states[i].period_micros;
+        elapsed_in_cycle = now_us - pwm_states[i].last_cycle_start_micros;
+      }
+      
+      if (elapsed_in_cycle >= pwm_states[i].on_time_micros) {
+        if (pwm_states[i].current_pin_state && pwm_states[i].duty_cycle < 1.0f) {
+           digitalWrite(pin, LOW);
+           pwm_states[i].current_pin_state = false;
+        }
+      } else {
+        if (!pwm_states[i].current_pin_state && pwm_states[i].duty_cycle > 0.0f) {
+           digitalWrite(pin, HIGH);
+           pwm_states[i].current_pin_state = true;
+        }
+      }
     }
   }
 }
@@ -898,7 +923,11 @@ static void initializePWMStates() {
     pwm_states[i].active = false;
     pwm_states[i].start_time = 0;
     pwm_states[i].duration = 0;
-    pwm_states[i].channel = (uint8_t)i;
+    pwm_states[i].duty_cycle = 0.0f;
+    pwm_states[i].period_micros = 0;
+    pwm_states[i].on_time_micros = 0;
+    pwm_states[i].last_cycle_start_micros = 0;
+    pwm_states[i].current_pin_state = false;
   }
 }
 
