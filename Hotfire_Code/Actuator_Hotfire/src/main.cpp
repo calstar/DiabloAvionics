@@ -47,15 +47,15 @@ static bool g_actuator_serial = true;
 //-----------------------------------------------------------------------------
 // State machine
 //-----------------------------------------------------------------------------
-enum class ActuatorControllerState {
-  WaitingForServer,
-  Active,
-  NoConnectionAbort,
-  PTAbort,
-  NoPTAbort,
-  AbortFinished,
-  ConnectionLossDetected,
-  NoConnAbortFollower
+enum class ActuatorControllerState : uint8_t {
+  WaitingForServer = 1, // SETUP
+  Active = 2,
+  ConnectionLossDetected = 3,
+  NoConnectionAbort = 4,
+  NoConnAbortFollower = 5,
+  PTAbort = 6,
+  NoPTAbort = 7,
+  AbortFinished = 8
 };
 
 static ActuatorControllerState state = ActuatorControllerState::WaitingForServer;
@@ -113,17 +113,7 @@ static unsigned long led_phase_start_ms = 0;
 static ActuatorControllerState last_led_state = ActuatorControllerState::WaitingForServer;
 
 static uint8_t getStateNumber(ActuatorControllerState s) {
-  switch (s) {
-    case ActuatorControllerState::WaitingForServer:   return 1;
-    case ActuatorControllerState::Active:             return 2;
-    case ActuatorControllerState::ConnectionLossDetected: return 3;
-    case ActuatorControllerState::NoConnectionAbort: return 4;
-    case ActuatorControllerState::NoConnAbortFollower: return 5;
-    case ActuatorControllerState::PTAbort:           return 6;
-    case ActuatorControllerState::NoPTAbort:         return 7;
-    case ActuatorControllerState::AbortFinished:     return 8;
-    default: return 1;
-  }
+  return static_cast<uint8_t>(s);
 }
 
 static const char* stateName(ActuatorControllerState s) {

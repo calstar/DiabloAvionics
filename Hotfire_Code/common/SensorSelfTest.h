@@ -6,18 +6,27 @@
 namespace SensorSelfTest {
 
 // Thresholds (ADC codes, full-scale = 2^31)
-// ADC TDAC test: VDD reference (5V). TDACP = 0.6*VDD (3V), TDACN = 0.5*VDD (2.5V).
-// Differential is 0.5V. Full-scale is 5V (VDD).
-// Expected code = (0.5V / 5.0V) * 2^31 = 214748364 (1/10th of full-scale).
-// We allow roughly ±5% of 2^31 tolerance for this test.
-constexpr int32_t ADC_TDAC_EXPECTED_CODE = 214748364;
-constexpr int32_t ADC_TDAC_TOLERANCE     = 107374182; // 5% of 2^31
+// ADC TDAC test: VDD reference. TDACP = 0.6*AVDD, TDACN = 0.5*AVDD.
+// Differential = 0.1*AVDD. Reference = AVDD. So code = 0.1 * 2^31.
+// We allow ±1% of the expected code.
+constexpr int32_t ADC_TDAC_EXPECTED_CODE = 214748364;           // 0.1 * 2^31
+constexpr int32_t ADC_TDAC_TOLERANCE     = 2147484;            // 1% of expected code
 
 // Sensor bias test (SBMAG = 0b110 → 10MΩ pull resistor via MODE1):
-// Open circuit  → bias pulls pin to rail → large |code|  (beyond SENSOR_BIAS_OPEN_THRESHOLD)
-// Closed sensor → small voltage drop    → small |code|  (below SENSOR_BIAS_CLOSED_THRESHOLD)
-constexpr int32_t SENSOR_BIAS_OPEN_THRESHOLD   = 1717986918; // 80% of 2^31
+// Open circuit  → bias pulls pin to rail → large |code|
+// Connected     → sensor loads the bias  → small |code|
+// Three-state thresholds:
+//   |code| < 20% FS  → CONNECTED (sensor clearly loads the bias)
+//   |code| > 80% FS  → DISCONNECTED (pin pulled to rail)
+//   between          → AMBIGUOUS
 constexpr int32_t SENSOR_BIAS_CLOSED_THRESHOLD = 429496729;  // 20% of 2^31
+constexpr int32_t SENSOR_BIAS_OPEN_THRESHOLD   = 1717986918; // 80% of 2^31
+
+enum class BiasResult : uint8_t {
+  CONNECTED    = 0,  // |code| < closed threshold — sensor is present
+  AMBIGUOUS    = 1,  // between thresholds — uncertain
+  DISCONNECTED = 2,  // |code| > open threshold — no sensor
+};
 
 /**
  * ADC self-test via internal TDAC.
@@ -28,16 +37,19 @@ constexpr int32_t SENSOR_BIAS_CLOSED_THRESHOLD = 429496729;  // 20% of 2^31
  */
 inline bool run_adc_self_test(ADS126X& adc, uint8_t drdy_pin,
                               uint8_t original_ref_neg, uint8_t original_ref_pos) {
-    // 1. Point mux to TDAC
+    // 1. Bypass PGA (datasheet recommends this for TDAC tests)
+    adc.bypassPGA();
+
+    // 2. Point mux to TDAC
     adc.setInputMux(ADS126X_TDAC, ADS126X_TDAC);
 
-    // 2. Turn on TDACs with specific dividers
+    // 3. Turn on TDACs with specific dividers
     adc.setOutputTDACP(1);
     adc.setOutputTDACN(1);
     adc.setOutputmagnitudeTDACP(ADS126X_TDAC_DIV_0_6);
     adc.setOutputmagnitudeTDACN(ADS126X_TDAC_DIV_0_5);
 
-    // 3. Switch to VDD reference (5V)
+    // 4. Switch to VDD reference
     adc.setReference(ADS126X_REF_NEG_VSS, ADS126X_REF_POS_VDD);
 
     // Wait for conversion
@@ -51,7 +63,8 @@ inline bool run_adc_self_test(ADS126X& adc, uint8_t drdy_pin,
     const auto reading = adc.readADC1();
     int32_t code = reading.value;
 
-    // 4. Cleanup
+    // 5. Cleanup: restore PGA, TDAC off, reference
+    adc.enablePGA();
     adc.setOutputTDACP(0);
     adc.setOutputTDACN(0);
     adc.setReference(original_ref_neg, original_ref_pos);
@@ -76,11 +89,12 @@ inline void sensor_bias_enable(ADS126X& adc) {
 
 /**
  * Read one connector with sensor bias already active.
- * Returns true (closed) if |code| < SENSOR_BIAS_CLOSED_THRESHOLD,
- * false (open)   if |code| > SENSOR_BIAS_OPEN_THRESHOLD.
+ * Returns CONNECTED if |code| < SENSOR_BIAS_CLOSED_THRESHOLD,
+ * DISCONNECTED if |code| >= SENSOR_BIAS_OPEN_THRESHOLD,
+ * AMBIGUOUS otherwise (or on checksum failure).
  */
-inline bool read_sensor_bias(ADS126X& adc, uint8_t drdy_pin,
-                             uint8_t adc_channel, uint8_t aincom) {
+inline BiasResult read_sensor_bias(ADS126X& adc, uint8_t drdy_pin,
+                                   uint8_t adc_channel, uint8_t aincom) {
     adc.setInputMux(adc_channel, aincom);
     delayMicroseconds(10);
     while (digitalRead(drdy_pin) != LOW) {
@@ -89,16 +103,14 @@ inline bool read_sensor_bias(ADS126X& adc, uint8_t drdy_pin,
     delayMicroseconds(25);
     
     auto reading = adc.readADC1();
-    if (!reading.checksumValid) return false;
+    if (!reading.checksumValid) return BiasResult::AMBIGUOUS;
     
     int32_t val = reading.value;
     if (val < 0) val = -val;
     
-    // We only explicitly return false if it's over the open threshold.
-    // E.g. if it's near-rail, it is open. 
-    // Anything below SENSOR_BIAS_CLOSED_THRESHOLD is definitely closed.
-    // For now, if val < SENSOR_BIAS_OPEN_THRESHOLD, we'll consider it "not open" (closed enough).
-    return val < SENSOR_BIAS_OPEN_THRESHOLD;
+    if (val < SENSOR_BIAS_CLOSED_THRESHOLD) return BiasResult::CONNECTED;
+    if (val >= SENSOR_BIAS_OPEN_THRESHOLD)  return BiasResult::DISCONNECTED;
+    return BiasResult::AMBIGUOUS;
 }
 
 /** Call once after the connector loop. Restores SBMAG = 0. */

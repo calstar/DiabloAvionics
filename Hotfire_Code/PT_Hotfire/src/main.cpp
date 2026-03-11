@@ -176,10 +176,11 @@ static void run_self_test_cb(void*,
   SensorSelfTest::sensor_bias_enable(ads126x);
   for (uint8_t i = 0; i < cfg.num_sensors; i++) {
     uint8_t id = cfg.sensor_ids[i];
-    bool ok = SensorSelfTest::read_sensor_bias(
+    auto bias = SensorSelfTest::read_sensor_bias(
         ads126x, Pins.ADC_DRDY_1,
         getAdcChannel(id, TEST_PIN), ADS126X_AINCOM);
-    results_out.push_back({id, ok ? 1u : 0u});
+    uint8_t pass = (bias == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
+    results_out.push_back({id, pass});
   }
   SensorSelfTest::sensor_bias_disable(ads126x);
 }

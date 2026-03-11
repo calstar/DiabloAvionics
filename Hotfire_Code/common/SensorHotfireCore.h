@@ -41,10 +41,10 @@ extern bool g_sensor_hotfire_serial;
 namespace SensorHotfire {
 
 enum class State : uint8_t {
-  WaitingForServer = 0,
-  Active = 1,
-  StandaloneAbort = 2,
-  SelfTest = 3
+  WaitingForServer = 1, // SETUP
+  Active = 2,           // ACTIVE
+  StandaloneAbort = 9,  // STANDALONE_ABORT
+  SelfTest = 10         // SELF_TEST
 };
 
 enum class IncomingPacketKind {
@@ -283,7 +283,7 @@ inline void sendBoardHeartbeat(CoreState& s, const Config& cfg,
 
 inline void updateStateLed(CoreState& s, const Config& cfg, int state_num) {
   if (state_num < 1) state_num = 1;
-  if (state_num > 4) state_num = 4;
+  if (state_num > 10) state_num = 10;
   const int led_pin = cfg.pins->LED;
   unsigned long now = millis();
   const unsigned long STATE_LED_CYCLE_MS = 2500;
@@ -497,9 +497,7 @@ inline void loop(CoreState& s, const Config& cfg) {
       break;
   }
 
-  int state_num = (s.state == State::WaitingForServer) ? 1 : 
-                  (s.state == State::Active)           ? 2 : 
-                  (s.state == State::StandaloneAbort)  ? 3 : 4; // SelfTest = 4 blinks
+  int state_num = static_cast<int>(s.state);
   updateStateLed(s, cfg, state_num);
 
   unsigned long now = millis();

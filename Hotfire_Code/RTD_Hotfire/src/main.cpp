@@ -252,10 +252,11 @@ static void run_self_test_cb(void*,
     int drdy_pin = drdy_for_connector(id);
 
     // Differential sensor bias test across pins 1 and 2
-    bool ok = SensorSelfTest::read_sensor_bias(
+    auto bias = SensorSelfTest::read_sensor_bias(
         adc, drdy_pin,
         static_cast<uint8_t>(ch1), static_cast<uint8_t>(ch2));
-    results_out.push_back({id, ok ? 1u : 0u});
+    uint8_t pass = (bias == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
+    results_out.push_back({id, pass});
   }
 
   SensorSelfTest::sensor_bias_disable(ads126x);
