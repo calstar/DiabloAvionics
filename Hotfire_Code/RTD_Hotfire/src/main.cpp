@@ -269,7 +269,6 @@ void setup() {
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);
 
-  coreConfig.board_type = Diablo::BoardType::RTD;
   coreConfig.board_name = "RTD";
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;

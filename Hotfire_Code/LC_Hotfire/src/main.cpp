@@ -205,7 +205,6 @@ void setup() {
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);
 
-  coreConfig.board_type = Diablo::BoardType::LOAD_CELL;
   coreConfig.board_name = "LC";
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;

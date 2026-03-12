@@ -19,6 +19,8 @@
 #include "main.h"
 #include "actuator_board_pins.h"
 #include "actuator_config.h"
+#include "firmware_hash.h"
+#include "hotfire_ota.h"
 
 using namespace actuator_board_pins;
 
@@ -36,6 +38,7 @@ const int udpListenPort = 5005;
 const int serverPort = HOTFIRE_SERVER_PORT;
 const int ptBoardPort = 5005;
 EthernetUDP udp;
+static OTAEthernetServer otaServer(HOTFIRE_OTA_PORT);
 
 //-----------------------------------------------------------------------------
 // Serial gating from ACTUATOR_CONFIG (enable_serial_printing); default on until config says otherwise
@@ -98,7 +101,11 @@ struct PWMState {
   bool active;
   unsigned long start_time;
   uint32_t duration;
-  uint8_t channel;
+  float duty_cycle;
+  uint32_t period_micros;
+  uint32_t on_time_micros;
+  unsigned long last_cycle_start_micros;
+  bool current_pin_state;
 };
 static PWMState pwm_states[NUM_ACTUATORS];
 
@@ -213,7 +220,7 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
 
 static void sendBoardHeartbeat() {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::ACTUATOR;
+  memcpy(hb.firmware_hash, FirmwareHash::get(), 32);
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = getBoardStateForHeartbeat();
@@ -422,6 +429,14 @@ static bool stateAcceptsActuatorCommand(uint32_t remote_ip32) {
   return false;
 }
 
+static const char* actuatorPacketTypeName(uint8_t type) {
+  switch (type) {
+    case 4:  return "ACTUATOR_COMMAND";
+    case 10: return "PWM_ACTUATOR_COMMAND";
+    default: return "UNKNOWN";
+  }
+}
+
 static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t len, IPAddress remoteIP) {
   Diablo::PacketHeader hdr;
   if (!readPacketHeader(buffer, len, hdr)) return IncomingPacketKind::None;
@@ -502,15 +517,45 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
     case Diablo::PacketType::ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::ActuatorCommand> commands;
-      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
-        processActuatorCommands(commands);
+      if (Diablo::parse_actuator_command_packet(buffer, len, cmd_header, commands)) {
+        ACTUATOR_PRINTLN("ACTUATOR_COMMAND received (DAQv2-Comms):");
+        for (size_t i = 0; i < commands.size(); ++i) {
+          const auto& cmd = commands[i];
+          ACTUATOR_PRINT("  [");
+          ACTUATOR_PRINT(static_cast<unsigned>(i));
+          ACTUATOR_PRINT("] actuator_id=");
+          ACTUATOR_PRINT(static_cast<unsigned>(cmd.actuator_id));
+          ACTUATOR_PRINT(" actuator_state=");
+          ACTUATOR_PRINTLN(static_cast<unsigned>(cmd.actuator_state));
+        }
+        Serial.flush();
+        if (stateAcceptsActuatorCommand(remote_ip32))
+          processActuatorCommands(commands);
+      }
       return IncomingPacketKind::None;
     }
     case Diablo::PacketType::PWM_ACTUATOR_COMMAND: {
       Diablo::PacketHeader cmd_header;
       std::vector<Diablo::PWMActuatorCommand> commands;
-      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands) && stateAcceptsActuatorCommand(remote_ip32))
-        processPWMActuatorCommand(commands);
+      if (Diablo::parse_pwm_actuator_packet(buffer, len, cmd_header, commands)) {
+        ACTUATOR_PRINTLN("PWM_ACTUATOR_COMMAND received (DAQv2-Comms):");
+        for (size_t i = 0; i < commands.size(); ++i) {
+          const auto& cmd = commands[i];
+          ACTUATOR_PRINT("  [");
+          ACTUATOR_PRINT(static_cast<unsigned>(i));
+          ACTUATOR_PRINT("] actuator_id=");
+          ACTUATOR_PRINT(static_cast<unsigned>(cmd.actuator_id));
+          ACTUATOR_PRINT(" duration_ms=");
+          ACTUATOR_PRINT(cmd.duration);
+          ACTUATOR_PRINT(" duty_cycle=");
+          ACTUATOR_PRINT(cmd.duty_cycle);
+          ACTUATOR_PRINT(" frequency=");
+          ACTUATOR_PRINTLN(cmd.frequency);
+        }
+        Serial.flush();
+        if (stateAcceptsActuatorCommand(remote_ip32))
+          processPWMActuatorCommand(commands);
+      }
       return IncomingPacketKind::None;
     }
     default:
@@ -523,11 +568,6 @@ static void processActuatorCommands(const std::vector<Diablo::ActuatorCommand> &
     if (cmd.actuator_id < 1 || cmd.actuator_id > NUM_ACTUATORS) continue;
     uint8_t idx = cmd.actuator_id - 1;
     if (pwm_states[idx].active) {
-      int pin = getActuatorPin(cmd.actuator_id);
-      if (pin >= 0) {
-        ledcWrite(pwm_states[idx].channel, 0);
-        ledcDetachPin(pin);
-      }
       pwm_states[idx].active = false;
     }
     int pin = getActuatorPin(cmd.actuator_id);
@@ -546,34 +586,60 @@ static void processPWMActuatorCommand(const std::vector<Diablo::PWMActuatorComma
     int pin = getActuatorPin(cmd.actuator_id);
     if (pin < 0) continue;
     uint8_t array_index = cmd.actuator_id - 1;
-    uint8_t channel = pwm_states[array_index].channel;
-    if (channel > 7) continue;
-    ledcSetup(channel, cmd.frequency, 14);
-    ledcAttachPin(pin, channel);
-    uint32_t max_duty = 16383;
-    uint32_t duty = (uint32_t)(cmd.duty_cycle * (float)max_duty);
-    if (duty > max_duty) duty = max_duty;
-    ledcWrite(channel, duty);
+    
+    uint32_t period_us = (cmd.frequency > 0) ? (1000000 / cmd.frequency) : 0;
+    uint32_t on_time_us = (uint32_t)(cmd.duty_cycle * (float)period_us);
+
     pwm_states[array_index].active = true;
     pwm_states[array_index].start_time = millis();
     pwm_states[array_index].duration = cmd.duration;
-    actuator_states[array_index] = (duty > 0) ? 1 : 0;
+    pwm_states[array_index].duty_cycle = cmd.duty_cycle;
+    pwm_states[array_index].period_micros = period_us;
+    pwm_states[array_index].on_time_micros = on_time_us;
+    pwm_states[array_index].last_cycle_start_micros = micros();
+    
+    bool initial_state = (cmd.duty_cycle > 0.0f);
+    pwm_states[array_index].current_pin_state = initial_state;
+    digitalWrite(pin, initial_state ? HIGH : LOW);
+
+    actuator_states[array_index] = initial_state ? 1 : 0;
   }
 }
 
 static void updatePWM() {
-  unsigned long now = millis();
+  unsigned long now_ms = millis();
+  unsigned long now_us = micros();
   for (int i = 0; i < NUM_ACTUATORS; i++) {
     if (!pwm_states[i].active) continue;
-    if (now - pwm_states[i].start_time >= pwm_states[i].duration) {
-      int pin = getActuatorPin(i + 1);
-      if (pin >= 0) {
-        ledcWrite(pwm_states[i].channel, 0);
-        ledcDetachPin(pin);
-        digitalWrite(pin, LOW);
-      }
+    int pin = getActuatorPin(i + 1);
+    if (pin < 0) continue;
+
+    if (now_ms - pwm_states[i].start_time >= pwm_states[i].duration) {
+      digitalWrite(pin, LOW);
       pwm_states[i].active = false;
       actuator_states[i] = 0;
+      continue;
+    }
+
+    if (pwm_states[i].period_micros > 0) {
+      unsigned long elapsed_in_cycle = now_us - pwm_states[i].last_cycle_start_micros;
+      
+      if (elapsed_in_cycle >= pwm_states[i].period_micros) {
+        pwm_states[i].last_cycle_start_micros += (elapsed_in_cycle / pwm_states[i].period_micros) * pwm_states[i].period_micros;
+        elapsed_in_cycle = now_us - pwm_states[i].last_cycle_start_micros;
+      }
+      
+      if (elapsed_in_cycle >= pwm_states[i].on_time_micros) {
+        if (pwm_states[i].current_pin_state && pwm_states[i].duty_cycle < 1.0f) {
+           digitalWrite(pin, LOW);
+           pwm_states[i].current_pin_state = false;
+        }
+      } else {
+        if (!pwm_states[i].current_pin_state && pwm_states[i].duty_cycle > 0.0f) {
+           digitalWrite(pin, HIGH);
+           pwm_states[i].current_pin_state = true;
+        }
+      }
     }
   }
 }
@@ -676,7 +742,8 @@ static void run_WaitingForServer() {
 
 static void run_Active() {
   streamSensorDataIfDue();
-  if (heartbeatTimedOut()) {
+  // Stay in Active: no transition on connection loss (code kept but unreachable).
+  if (false && heartbeatTimedOut()) {
     setState(ActuatorControllerState::ConnectionLossDetected);
     connection_loss_received_ips.clear();
   }
@@ -803,10 +870,13 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case ActuatorControllerState::Active:
-      if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
-        setState(ActuatorControllerState::AbortFinished);
-      } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
-        setState(ActuatorControllerState::NoConnAbortFollower);
+      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (code kept but unreachable).
+      if (false) {
+        if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
+          setState(ActuatorControllerState::AbortFinished);
+        } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
+          setState(ActuatorControllerState::NoConnAbortFollower);
+        }
       }
       break;
     case ActuatorControllerState::ConnectionLossDetected:
@@ -846,7 +916,11 @@ static void initializePWMStates() {
     pwm_states[i].active = false;
     pwm_states[i].start_time = 0;
     pwm_states[i].duration = 0;
-    pwm_states[i].channel = (uint8_t)i;
+    pwm_states[i].duty_cycle = 0.0f;
+    pwm_states[i].period_micros = 0;
+    pwm_states[i].on_time_micros = 0;
+    pwm_states[i].last_cycle_start_micros = 0;
+    pwm_states[i].current_pin_state = false;
   }
 }
 
@@ -855,6 +929,7 @@ static void initializePWMStates() {
 //-----------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  FirmwareHash::print();
   Serial.println("Actuator Hotfire starting...");
 
 #if TEMP_HARDCODE_BOARD_ID
@@ -900,9 +975,10 @@ void setup() {
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
   delay(ETHERNET_BEGIN_DELAY_MS);
   udp.begin(udpListenPort);
-
+  otaServer.begin();
   Serial.print("Ethernet initialized. IP: ");
   Serial.println(Ethernet.localIP());
+  Serial.printf("OTA TCP server listening on port %d\n", HOTFIRE_OTA_PORT);
 
   state = ActuatorControllerState::WaitingForServer;
   Serial.println("State -> WaitingForServer");
@@ -914,6 +990,10 @@ void setup() {
 }
 
 void loop() {
+  // Non-blocking OTA check — blocks only if a client actually connects
+  EthernetClient ota_client = otaServer.available();
+  if (ota_client) hotfire_handleOTA(ota_client);
+
   updateLedNonBlocking();
   updatePWM();
 
@@ -923,12 +1003,26 @@ void loop() {
     uint8_t packetBuffer[MAX_PACKET_SIZE];
     int bytesRead = udp.read(packetBuffer, sizeof(packetBuffer));
     if (bytesRead > 0) {
-      Serial.print("Received packet from ");
-      Serial.print(remoteIP);
-      Serial.print(":");
-      Serial.print(udp.remotePort());
-      Serial.print(" type ");
-      Serial.println(bytesRead >= (int)sizeof(Diablo::PacketHeader) ? (unsigned)packetBuffer[0] : 0);
+      const uint8_t pktType = bytesRead >= (int)sizeof(Diablo::PacketHeader) ? packetBuffer[0] : 0;
+      ACTUATOR_PRINT("Received packet from ");
+      ACTUATOR_PRINT(remoteIP);
+      ACTUATOR_PRINT(":");
+      ACTUATOR_PRINT(udp.remotePort());
+      ACTUATOR_PRINT(" type ");
+      ACTUATOR_PRINT(static_cast<unsigned>(pktType));
+      if (pktType == 4 || pktType == 10) {
+        ACTUATOR_PRINT(" (");
+        ACTUATOR_PRINT(actuatorPacketTypeName(pktType));
+        ACTUATOR_PRINT(") len=");
+        ACTUATOR_PRINT(bytesRead);
+        ACTUATOR_PRINT(" hex:");
+        for (int i = 0; i < bytesRead && i < 32; i++) {
+          ACTUATOR_PRINT(" ");
+          if (packetBuffer[i] < 16) ACTUATOR_PRINT("0");
+          if (g_actuator_serial) Serial.print(packetBuffer[i], HEX);
+        }
+      }
+      ACTUATOR_PRINTLN("");
       Serial.flush();
       connection_loss_received_ips.insert(
         static_cast<uint32_t>(remoteIP[0]) << 24 |

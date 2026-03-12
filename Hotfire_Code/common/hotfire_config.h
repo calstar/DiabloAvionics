@@ -33,3 +33,6 @@
 
 // Sensor data: chunks per packet (all sense boards: PT, TC, LC, RTD)
 #define HOTFIRE_CHUNKS_PER_PACKET   9
+
+// OTA: TCP port all hotfire boards listen on for firmware updates
+#define HOTFIRE_OTA_PORT            3232

@@ -191,7 +191,6 @@ void setup() {
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);
 
-  coreConfig.board_type = Diablo::BoardType::PRESSURE_TRANSDUCER;
   coreConfig.board_name = "PT";
   coreConfig.pins = &Pins;
   coreConfig.init_adc = init_adc_cb;
