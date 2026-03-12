@@ -21,6 +21,8 @@
 #include <DAQv2-Comms.h>
 #include <cstring>
 #include <esp_mac.h>
+#include "firmware_hash.h"
+#include "hotfire_ota.h"
 
 #ifndef SENSOR_HOTFIRE_MAX_PACKET_SIZE
 #define SENSOR_HOTFIRE_MAX_PACKET_SIZE 512
@@ -39,6 +41,8 @@ extern bool g_sensor_hotfire_serial;
 #define SENSOR_HOTFIRE_PRINTLN_()  do { if (g_sensor_hotfire_serial) Serial.println(); } while(0)
 
 namespace SensorHotfire {
+
+inline OTAEthernetServer g_ota_server{HOTFIRE_OTA_PORT};
 
 enum class State : uint8_t {
   WaitingForServer = 0,
@@ -64,7 +68,6 @@ struct StoredSensorConfig {
 };
 
 struct Config {
-  Diablo::BoardType board_type;
   const char* board_name;
   const sense_board_pins::Layout* pins;
   void (*init_adc)(void* user_data);
@@ -245,7 +248,7 @@ inline void applyPacketTransition(CoreState& s, IncomingPacketKind kind) {
 inline void sendBoardHeartbeat(CoreState& s, const Config& cfg,
     Diablo::BoardState board_state, IPAddress dest_ip, int dest_port) {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = cfg.board_type;
+  memcpy(hb.firmware_hash, FirmwareHash::get(), 32);
   hb.board_id = s.board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = board_state;
@@ -317,6 +320,7 @@ inline bool loadBoardIdFromSpiffs(CoreState& s, const char* path, uint8_t defaul
 
 inline void setup(CoreState& s, const Config& cfg) {
   Serial.begin(115200);
+  FirmwareHash::print();
   SENSOR_HOTFIRE_PRINT(cfg.board_name);
   SENSOR_HOTFIRE_PRINTLN(" Hotfire state machine starting...");
 
@@ -358,6 +362,9 @@ inline void setup(CoreState& s, const Config& cfg) {
   Serial.print("UDP listening on port ");
   Serial.println(SENSOR_UDP_LISTEN_PORT);
   Serial.println("(Expect SENSOR_CONFIG packet type 5 to transition to Active)");
+  g_ota_server.begin();
+  Serial.print("OTA TCP server listening on port ");
+  Serial.println(HOTFIRE_OTA_PORT);
   Serial.flush();
 
   s.state = State::WaitingForServer;
@@ -376,6 +383,10 @@ inline void setup(CoreState& s, const Config& cfg) {
 }
 
 inline void loop(CoreState& s, const Config& cfg) {
+  // Non-blocking OTA check — blocks only if a client actually connects
+  EthernetClient ota_client = g_ota_server.available();
+  if (ota_client) hotfire_handleOTA(ota_client);
+
   const size_t maxPacket = SENSOR_HOTFIRE_MAX_PACKET_SIZE;
   static uint32_t s_udp_check_count = 0;
   static unsigned long s_last_debug_ms = 0;

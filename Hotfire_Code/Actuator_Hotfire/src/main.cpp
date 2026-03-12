@@ -19,6 +19,8 @@
 #include "main.h"
 #include "actuator_board_pins.h"
 #include "actuator_config.h"
+#include "firmware_hash.h"
+#include "hotfire_ota.h"
 
 using namespace actuator_board_pins;
 
@@ -36,6 +38,7 @@ const int udpListenPort = 5005;
 const int serverPort = HOTFIRE_SERVER_PORT;
 const int ptBoardPort = 5005;
 EthernetUDP udp;
+static OTAEthernetServer otaServer(HOTFIRE_OTA_PORT);
 
 //-----------------------------------------------------------------------------
 // Serial gating from ACTUATOR_CONFIG (enable_serial_printing); default on until config says otherwise
@@ -227,7 +230,7 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
 
 static void sendBoardHeartbeat() {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::ACTUATOR;
+  memcpy(hb.firmware_hash, FirmwareHash::get(), 32);
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = getBoardStateForHeartbeat();
@@ -936,6 +939,7 @@ static void initializePWMStates() {
 //-----------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  FirmwareHash::print();
   Serial.println("Actuator Hotfire starting...");
 
 #if TEMP_HARDCODE_BOARD_ID
@@ -981,9 +985,10 @@ void setup() {
   Ethernet.begin(mac, staticIP, dns, gateway, subnet);
   delay(ETHERNET_BEGIN_DELAY_MS);
   udp.begin(udpListenPort);
-
+  otaServer.begin();
   Serial.print("Ethernet initialized. IP: ");
   Serial.println(Ethernet.localIP());
+  Serial.printf("OTA TCP server listening on port %d\n", HOTFIRE_OTA_PORT);
 
   state = ActuatorControllerState::WaitingForServer;
   Serial.println("State -> WaitingForServer");
@@ -995,6 +1000,10 @@ void setup() {
 }
 
 void loop() {
+  // Non-blocking OTA check — blocks only if a client actually connects
+  EthernetClient ota_client = otaServer.available();
+  if (ota_client) hotfire_handleOTA(ota_client);
+
   updateLedNonBlocking();
   updatePWM();
 
