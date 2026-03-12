@@ -237,6 +237,11 @@ void handleOTA(EthernetClient& client) {
   Serial.println("[OTA]   UPDATE SUCCESSFUL — Rebooting now...");
   Serial.println("[OTA] ============================================");
   Serial.flush();
+
+  // Send confirmation back to uploader before closing and rebooting
+  client.println("OK");
+  client.flush();
+
   client.stop();
   delay(500);
   ESP.restart();

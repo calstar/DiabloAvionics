@@ -10,13 +10,17 @@ Requirements: pip install pyqt6 pyqtgraph numpy
 """
 
 import json
+import os
 import socket
 import struct
+import subprocess
 import sys
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Callable
+import shutil
 
 LEADERBOARD_JSON = Path(__file__).resolve().parent / "sense_testing_leaderboard.json"
 
@@ -51,8 +55,8 @@ import numpy as np
 MAX_PACKET_SIZE = 512
 PACKET_HEADER_FORMAT = '<BBI'
 PACKET_HEADER_SIZE = 6
-BOARD_HEARTBEAT_BODY_FORMAT = '<BBBB'
-BOARD_HEARTBEAT_BODY_SIZE = 4
+BOARD_HEARTBEAT_BODY_FORMAT = '<32sBBB'   # firmware_hash[32], board_id, engine_state, board_state
+BOARD_HEARTBEAT_BODY_SIZE = 35
 PacketType = type('PacketType', (), {
     'BOARD_HEARTBEAT': 1,
     'SERVER_HEARTBEAT': 2,
@@ -63,7 +67,12 @@ PacketType = type('PacketType', (), {
     'CLEAR_ABORT': 9,
     'NO_CONNECTION_ABORT': 11,
 })()
-BoardState = type('BoardState', (), {'SETUP': 1, 'ACTIVE': 2, 'ABORT': 3, 'ABORT_DONE': 4})()
+BoardState = type('BoardState', (), {
+    'SETUP': 1, 'ACTIVE': 2,
+    'CONNECTION_LOSS_DETECTED': 3, 'NO_CONNECTION_ABORT': 4,
+    'NO_CONN_ABORT_FOLLOWER': 5, 'PT_ABORT': 6, 'NO_PT_ABORT': 7,
+    'ABORT_FINISHED': 8, 'STANDALONE_ABORT': 9, 'SELF_TEST': 10,
+})()
 DIABLO_COMMS_VERSION = 0
 SENSOR_DATA_PACKET_FORMAT = '<BB'
 SENSOR_DATA_PACKET_SIZE = 2
@@ -91,6 +100,60 @@ SENSOR_COLORS = [
 ]
 
 
+def parse_sensor_ids_from_text(text: str) -> List[int]:
+    """Parse a comma/space-separated list of sensor IDs into a cleaned uint8 list."""
+    if not text:
+        return []
+    ids: List[int] = []
+    for token in text.replace(",", " ").split():
+        try:
+            v = int(token, 10)
+        except ValueError:
+            continue
+        if 0 <= v <= 255:
+            ids.append(v)
+    # Deduplicate while preserving order
+    seen = set()
+    unique_ids: List[int] = []
+    for v in ids:
+        if v not in seen:
+            seen.add(v)
+            unique_ids.append(v)
+    return unique_ids
+
+
+class OTAWorker(QtCore.QThread):
+    progress = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(bool, str)
+
+    def __init__(self, project_dir: Path, env_name: str, ip: str, port: int):
+        super().__init__()
+        self._project_dir = project_dir
+        self._env_name = env_name
+        self._ip = ip
+        self._port = port
+
+    def run(self):
+        try:
+            if self.isInterruptionRequested():
+                self.finished.emit(False, "OTA cancelled.")
+                return
+            self.progress.emit("[OTA] Compiling firmware...")
+            bin_path = compile_firmware(self._project_dir, self._env_name)
+            if self.isInterruptionRequested():
+                self.finished.emit(False, "OTA cancelled.")
+                return
+            self.progress.emit(f"[OTA] Build OK: {bin_path}")
+            self.progress.emit("[OTA] Starting upload...")
+            upload_firmware_to_esp32(bin_path, self._ip, self._port, progress_cb=self.progress.emit)
+            if self.isInterruptionRequested():
+                self.finished.emit(False, "OTA cancelled.")
+                return
+            self.finished.emit(True, "OTA upload finished.")
+        except Exception as e:
+            self.finished.emit(False, f"OTA error: {e}")
+
+
 def parse_packet_header(data: bytes) -> Optional[Tuple[int, int, int]]:
     if len(data) < PACKET_HEADER_SIZE:
         return None
@@ -100,8 +163,11 @@ def parse_packet_header(data: bytes) -> Optional[Tuple[int, int, int]]:
         return None
 
 
-def parse_board_heartbeat_packet(data: bytes) -> Optional[Tuple[tuple, int, int, int, int]]:
-    """Returns (header, board_type, board_id, engine_state, board_state) or None."""
+def parse_board_heartbeat_packet(data: bytes) -> Optional[Tuple[tuple, bytes, int, int, int]]:
+    """Returns (header, firmware_hash, board_id, engine_state, board_state) or None.
+
+    firmware_hash is the 32-byte SHA-256 of the running firmware binary.
+    """
     if len(data) < PACKET_HEADER_SIZE + BOARD_HEARTBEAT_BODY_SIZE:
         return None
     header = parse_packet_header(data)
@@ -114,19 +180,24 @@ def parse_board_heartbeat_packet(data: bytes) -> Optional[Tuple[tuple, int, int,
         )
     except struct.error:
         return None
+    # body: (firmware_hash_bytes, board_id, engine_state, board_state)
     return (header, body[0], body[1], body[2], body[3])
 
 
 def board_state_name(state: int) -> str:
-    if state == BoardState.SETUP:
-        return "Setup"
-    if state == BoardState.ACTIVE:
-        return "Active"
-    if state == BoardState.ABORT:
-        return "Abort"
-    if state == BoardState.ABORT_DONE:
-        return "Abort done"
-    return f"Unknown ({state})"
+    names = {
+        BoardState.SETUP:                    "Setup",
+        BoardState.ACTIVE:                   "Active",
+        BoardState.CONNECTION_LOSS_DETECTED: "Conn Loss",
+        BoardState.NO_CONNECTION_ABORT:      "No Conn Abort",
+        BoardState.NO_CONN_ABORT_FOLLOWER:   "No Conn Follower",
+        BoardState.PT_ABORT:                 "PT Abort",
+        BoardState.NO_PT_ABORT:              "No PT Abort",
+        BoardState.ABORT_FINISHED:           "Abort Finished",
+        BoardState.STANDALONE_ABORT:         "Standalone Abort",
+        BoardState.SELF_TEST:                "Self Test",
+    }
+    return names.get(state, f"Unknown ({state})")
 
 
 def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
@@ -252,6 +323,110 @@ def code_to_force(
     return proportion * full_scale_force
 
 
+def find_pio_command() -> str:
+    """Try to find the 'pio' command in PATH or common installation locations (Windows)."""
+    pio_path = shutil.which("pio")
+    if pio_path:
+        return pio_path
+
+    if sys.platform == "win32":
+        user_profile = os.environ.get("USERPROFILE", "")
+        paths_to_check = [
+            os.path.join(user_profile, ".platformio", "penv", "Scripts", "pio.exe"),
+            os.path.join(user_profile, "AppData", "Local", "Programs", "Python", "Python313", "Scripts", "pio.exe"),
+            "C:\\Python313\\Scripts\\pio.exe",
+        ]
+        for path in paths_to_check:
+            if os.path.isfile(path):
+                return path
+
+    return "pio"
+
+
+def compile_firmware(project_dir: Path, env_name: str) -> Path:
+    """Compile a PlatformIO project and return firmware.bin path."""
+    env = os.environ.copy()
+    pio_cmd = find_pio_command()
+    result = subprocess.run(
+        [pio_cmd, "run"],
+        cwd=str(project_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"PlatformIO build failed (exit {result.returncode}).")
+
+    build_dir = project_dir / ".pio" / "build"
+    if env_name:
+        fw_path = build_dir / env_name / "firmware.bin"
+        if fw_path.is_file():
+            return fw_path
+    # Fallback: first firmware.bin under .pio/build
+    for root, _dirs, files in os.walk(build_dir):
+        if "firmware.bin" in files:
+            return Path(root) / "firmware.bin"
+    raise FileNotFoundError("firmware.bin not found under .pio/build; check env name or PlatformIO config.")
+
+
+def upload_firmware_to_esp32(
+    bin_path: Path,
+    ip: str,
+    port: int,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Send firmware binary to ESP32 over TCP using Ethernet OTA protocol."""
+    def emit(msg: str) -> None:
+        if progress_cb is not None:
+            progress_cb(msg)
+
+    file_size = bin_path.stat().st_size
+    emit(f"[UPLOAD] Target {ip}:{port}, size {file_size} bytes")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5.0)
+    try:
+        sock.connect((ip, port))
+    except Exception as e:
+        sock.close()
+        raise RuntimeError(f"Failed to connect to {ip}:{port}: {e}") from e
+
+    sock.settimeout(30.0)
+    try:
+        header = struct.pack(">I", file_size)
+        sock.sendall(header)
+        emit("[UPLOAD] Sent size header")
+
+        sent = 0
+        last_percent = -1
+        start_time = time.time()
+        with open(bin_path, "rb") as f:
+            while sent < file_size:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+                sock.sendall(chunk)
+                sent += len(chunk)
+                percent = int(sent * 100 / file_size)
+                if percent // 5 != last_percent // 5:
+                    last_percent = percent
+                    elapsed = max(time.time() - start_time, 1e-6)
+                    rate_kb = sent / elapsed / 1024.0
+                    emit(f"[UPLOAD] {percent}% ({sent}/{file_size} bytes, {rate_kb:.1f} KB/s)")
+
+        emit("[UPLOAD] Transfer complete, waiting for OK...")
+        try:
+            resp = sock.recv(1024).decode(errors="ignore").strip()
+        except socket.timeout:
+            resp = ""
+        if "OK" in resp:
+            emit("[UPLOAD] ESP32 reported OK, rebooting.")
+        else:
+            emit(f"[UPLOAD] No explicit OK from ESP32 (response='{resp}')")
+    finally:
+        sock.close()
+
+
 def _make_header(packet_type: int) -> bytes:
     """Build 6-byte packet header: type, version, timestamp (little-endian)."""
     ts = int(time.time() * 1000) & 0xFFFFFFFF
@@ -264,20 +439,60 @@ def build_server_heartbeat_packet() -> bytes:
 
 
 def build_sensor_config_packet(
+    sensor_ids: List[int],
     necessary_for_abort: bool,
     controller_ip: Optional[str],
     reference_voltage: int = 0,
     enable_serial_printing: int = 0,
 ) -> bytes:
-    """Sensor config: header(6) + reference_voltage(1) + necessary_for_abort(1) + optional controller_ip (4B BE) + enable_serial_printing(1).
-    reference_voltage: 0 = internal 2.5V, 1 = VDD. enable_serial_printing: 1 = enable, 0 = disable (DAQv2-Comms field).
+    """Build SENSOR_CONFIG packet matching DAQv2-Comms SensorConfigPacket layout.
+
+    Wire format after standard 6-byte header:
+      - uint8  num_sensors (N)
+      - N x uint8 sensor_id
+      - uint8  reference_voltage  (0 = 2.5V internal, 1 = VDD, 2 = ignore/board default)
+      - uint8  necessary_for_abort (0/1)
+      - if necessary_for_abort: uint32 controller_ip (big-endian)
+      - uint8  enable_serial_printing (0/1)
     """
-    pkt = _make_header(PacketType.SENSOR_CONFIG) + struct.pack('<B', reference_voltage & 0xFF) + struct.pack('<B', 1 if necessary_for_abort else 0)
+    # Clamp/clean sensor IDs to uint8
+    clean_ids: List[int] = []
+    for sid in sensor_ids:
+        try:
+            v = int(sid)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= v <= 255:
+            clean_ids.append(v)
+
+    if len(clean_ids) > 255:
+        clean_ids = clean_ids[:255]
+
+    header = _make_header(PacketType.SENSOR_CONFIG)
+    body = bytearray()
+
+    # num_sensors + sensor_ids
+    body.append(len(clean_ids) & 0xFF)
+    body.extend(bytes(clean_ids))
+
+    # reference_voltage and necessary_for_abort
+    body.append(reference_voltage & 0xFF)
+    body.append(1 if necessary_for_abort else 0)
+
+    # optional controller_ip (big-endian) if necessary_for_abort is set and IP provided
     if necessary_for_abort and controller_ip:
         parts = [int(x) for x in controller_ip.strip().split('.')]
         if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
-            pkt += struct.pack('>I', (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
-    pkt += struct.pack('<B', 1 if enable_serial_printing else 0)
+            ip_be = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+            body.extend(struct.pack('>I', ip_be))
+
+    # enable_serial_printing byte
+    body.append(1 if enable_serial_printing else 0)
+
+    pkt = header + bytes(body)
+    if len(pkt) > MAX_PACKET_SIZE:
+        # Truncate rather than crash; board will treat as malformed.
+        pkt = pkt[:MAX_PACKET_SIZE]
     return pkt
 
 
@@ -308,7 +523,7 @@ def build_actuator_config_packet_from_file(filepath: str) -> Optional[bytes]:
 class UDPReceiver(QtCore.QThread):
     sensor_data_received = QtCore.pyqtSignal(dict, list, str)
     sensor_data_packet_status = QtCore.pyqtSignal(str, bool)  # source_ip, parsed_ok (True=ok, False=malformed)
-    board_heartbeat_received = QtCore.pyqtSignal(float, int, int, int, str)  # timestamp, board_id, board_state, engine_state, source_ip
+    board_heartbeat_received = QtCore.pyqtSignal(float, int, int, int, str, bytes)  # timestamp, board_id, board_state, engine_state, source_ip, firmware_hash
     status_update = QtCore.pyqtSignal(str)
 
     def __init__(self, port: int, bind_address: str = '0.0.0.0', sock: Optional[socket.socket] = None):
@@ -367,9 +582,9 @@ class UDPReceiver(QtCore.QThread):
                 if header[0] == PacketType.BOARD_HEARTBEAT:
                     result = parse_board_heartbeat_packet(data)
                     if result:
-                        _h, board_type, board_id, engine_state, board_state = result
+                        _h, firmware_hash, board_id, engine_state, board_state = result
                         self.board_heartbeat_received.emit(
-                            time.time(), board_id, board_state, engine_state, addr[0]
+                            time.time(), board_id, board_state, engine_state, addr[0], firmware_hash
                         )
                 elif header[0] == PacketType.SENSOR_DATA:
                     result = parse_sensor_data_packet(data)
@@ -416,6 +631,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.board_id: Optional[int] = None
         self.board_state: Optional[int] = None
         self.board_source_ip: Optional[str] = None
+        self.firmware_hash: Optional[bytes] = None
 
         # One UDP socket bound to port: receiver uses it for recvfrom, we use it for sendto.
         # Board sends board heartbeats to (our IP, this port), so we must send from this port.
@@ -586,6 +802,9 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         board_layout.addWidget(self.board_id_label)
         self.board_ip_label = QtWidgets.QLabel("Source: —")
         board_layout.addWidget(self.board_ip_label)
+        self.firmware_hash_label = QtWidgets.QLabel("Firmware hash: —")
+        self.firmware_hash_label.setStyleSheet("color: #8ab; font-size: 11px; font-family: monospace;")
+        board_layout.addWidget(self.firmware_hash_label)
         self.sensor_data_status_label = QtWidgets.QLabel("Sensor data packets: —")
         self.sensor_data_status_label.setStyleSheet("color: #8ab; font-size: 11px;")
         board_layout.addWidget(self.sensor_data_status_label)
@@ -601,11 +820,6 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.send_heartbeat_cb.stateChanged.connect(self._on_send_heartbeat_changed)
         cmd_layout.addWidget(self.send_heartbeat_cb)
 
-        self.simulate_no_conn_abort_cb = QtWidgets.QCheckBox("Simulate NoConnAbort")
-        self.simulate_no_conn_abort_cb.setToolTip(
-            "When checked: stop sending server heartbeats (board will see connection loss) while still receiving and displaying board state."
-        )
-        cmd_layout.addWidget(self.simulate_no_conn_abort_cb)
 
         target_row = QtWidgets.QHBoxLayout()
         target_row.addWidget(QtWidgets.QLabel("Target IP:"))
@@ -636,6 +850,10 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.enable_serial_printing_cb = QtWidgets.QCheckBox("Enable serial printing on board")
         self.enable_serial_printing_cb.setToolTip("If checked, sensor config packet tells the board to enable Serial output (DAQv2-Comms field).")
         sens_layout.addWidget(self.enable_serial_printing_cb)
+        sens_layout.addWidget(QtWidgets.QLabel("Sensor IDs (comma-separated):"))
+        self.sensor_ids_edit = QtWidgets.QLineEdit()
+        self.sensor_ids_edit.setPlaceholderText("e.g. 1,2,3,10  (leave empty for board default)")
+        sens_layout.addWidget(self.sensor_ids_edit)
         sens_layout.addWidget(QtWidgets.QLabel("Actuator controller IP:"))
         self.actuator_ip_edit = QtWidgets.QLineEdit()
         self.actuator_ip_edit.setPlaceholderText("192.168.2.20")
@@ -687,6 +905,57 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         right_column_layout.setContentsMargins(0, 0, 0, 0)
         right_column_layout.addWidget(cmd_panel)
 
+        # Ethernet OTA controls
+        ota_grp = QtWidgets.QGroupBox("Ethernet OTA")
+        ota_layout = QtWidgets.QVBoxLayout(ota_grp)
+
+        ota_proj_row = QtWidgets.QHBoxLayout()
+        ota_proj_row.addWidget(QtWidgets.QLabel("PlatformIO project:"))
+        self.ota_project_dir_edit = QtWidgets.QLineEdit()
+        self.ota_project_dir_edit.setPlaceholderText("Path to PlatformIO project folder")
+        ota_proj_row.addWidget(self.ota_project_dir_edit)
+        self.ota_project_browse_btn = QtWidgets.QPushButton("Browse")
+        self.ota_project_browse_btn.clicked.connect(self._browse_ota_project_dir)
+        ota_proj_row.addWidget(self.ota_project_browse_btn)
+        ota_layout.addLayout(ota_proj_row)
+
+        ota_env_row = QtWidgets.QHBoxLayout()
+        ota_env_row.addWidget(QtWidgets.QLabel("Env name:"))
+        self.ota_env_edit = QtWidgets.QLineEdit()
+        self.ota_env_edit.setPlaceholderText("e.g. adafruit_feather_esp32s3")
+        self.ota_env_edit.setText("adafruit_feather_esp32s3")
+        ota_env_row.addWidget(self.ota_env_edit)
+        ota_layout.addLayout(ota_env_row)
+
+
+        ota_port_row = QtWidgets.QHBoxLayout()
+        ota_port_row.addWidget(QtWidgets.QLabel("OTA TCP port:"))
+        self.ota_port_spin = QtWidgets.QSpinBox()
+        self.ota_port_spin.setRange(1, 65535)
+        self.ota_port_spin.setValue(3232)
+        ota_port_row.addWidget(self.ota_port_spin)
+        ota_layout.addLayout(ota_port_row)
+
+        self.ota_upload_btn = QtWidgets.QPushButton("Compile && Upload")
+        self.ota_upload_btn.setToolTip("Compile selected PlatformIO project and upload firmware via Ethernet OTA to the Target IP.")
+        self.ota_upload_btn.clicked.connect(self._on_ota_compile_and_upload_clicked)
+        ota_layout.addWidget(self.ota_upload_btn)
+
+        self.ota_log = QtWidgets.QPlainTextEdit()
+        self.ota_log.setReadOnly(True)
+        self.ota_log.setFixedHeight(130)
+        self.ota_log.setPlaceholderText("OTA output will appear here…")
+        self.ota_log.setStyleSheet(
+            "QPlainTextEdit {"
+            "  background: #1a1a1a; color: #c8c8c8;"
+            "  font-family: monospace; font-size: 11px;"
+            "  border: 1px solid #333;"
+            "}"
+        )
+        ota_layout.addWidget(self.ota_log)
+
+        right_column_layout.addWidget(ota_grp)
+
         leaderboard_grp = QtWidgets.QGroupBox("Max force")
         leaderboard_grp.setStyleSheet("QGroupBox { font-size: 10px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px 2px 4px; }")
         leaderboard_grp.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
@@ -725,6 +994,9 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.update_timer.timeout.connect(self._update_plots)
         self._started = False
 
+        # OTA worker
+        self._ota_worker: Optional["OTAWorker"] = None
+
         # Start listening on load (receiver uses same socket as _send_sock so board replies reach us)
         port = self.port_spin.value()
         self.receiver = UDPReceiver(port=port, sock=self._shared_sock)
@@ -742,6 +1014,55 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
 
     def _on_window_seconds_changed(self, value: float):
         self.window_seconds = value
+
+    def _browse_ota_project_dir(self):
+        # Start browsing from the DiabloAvionics repo root by default
+        default_root = str(Path(__file__).resolve().parents[1])
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select PlatformIO project folder",
+            default_root,
+        )
+        if directory:
+            self.ota_project_dir_edit.setText(directory)
+
+    def _on_ota_compile_and_upload_clicked(self):
+        if self._ota_worker is not None and self._ota_worker.isRunning():
+            self.ota_log.appendPlainText("[OTA] Already running…")
+            return
+        project_dir_str = self.ota_project_dir_edit.text().strip()
+        if not project_dir_str:
+            self.ota_log.appendPlainText("[OTA] Error: set PlatformIO project folder.")
+            return
+        project_dir = Path(project_dir_str)
+        if not project_dir.is_dir():
+            self.ota_log.appendPlainText("[OTA] Error: project folder does not exist.")
+            return
+        env_name = self.ota_env_edit.text().strip()
+        ip = self.target_ip_edit.text().strip()
+        if not ip:
+            self.ota_log.appendPlainText("[OTA] Error: set Target IP first.")
+            return
+        port = int(self.ota_port_spin.value())
+
+        self.ota_log.clear()
+        self.ota_log.appendPlainText(f"[OTA] Starting — target {ip}:{port}")
+        self.ota_upload_btn.setEnabled(False)
+
+        self._ota_worker = OTAWorker(project_dir, env_name, ip, port)
+        self._ota_worker.progress.connect(self._on_ota_progress)
+        self._ota_worker.finished.connect(self._on_ota_finished)
+        self._ota_worker.start()
+
+    def _on_ota_progress(self, msg: str):
+        self.ota_log.appendPlainText(msg)
+        self.ota_log.verticalScrollBar().setValue(self.ota_log.verticalScrollBar().maximum())
+
+    def _on_ota_finished(self, ok: bool, msg: str):
+        self.ota_log.appendPlainText(msg)
+        self.ota_log.verticalScrollBar().setValue(self.ota_log.verticalScrollBar().maximum())
+        self.ota_upload_btn.setEnabled(True)
+        self.ota_upload_btn.setEnabled(True)
 
     def _on_show_temperature_k_changed(self, state):
         from PyQt6.QtCore import Qt
@@ -838,12 +1159,17 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self.sensor_data_status_label.setText(f"Sensor data: from {source_ip} (malformed)")
             self.sensor_data_status_label.setStyleSheet("color: #e67e22; font-size: 11px;")
 
-    def _on_board_heartbeat(self, timestamp: float, board_id: int, board_state: int, engine_state: int, source_ip: str):
+    def _on_board_heartbeat(self, timestamp: float, board_id: int, board_state: int, engine_state: int, source_ip: str, firmware_hash: bytes):
         self.heartbeat_timestamps.append(timestamp)
         self.last_heartbeat_time = timestamp
         self.board_id = board_id
         self.board_state = board_state
         self.board_source_ip = source_ip
+        self.firmware_hash = firmware_hash
+        full_hex = firmware_hash.hex()
+        short_hex = full_hex[:16] + "..."
+        self.firmware_hash_label.setText(f"Firmware hash: {short_hex}")
+        self.firmware_hash_label.setToolTip(f"SHA-256: {full_hex}")
         # Do not auto-fill Target IP — user's value is always used for Send sensor config / abort / heartbeat
 
     def _on_send_heartbeat_changed(self, state):
@@ -853,8 +1179,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self._server_heartbeat_timer.stop()
 
     def _send_server_heartbeat_once(self):
-        if self.simulate_no_conn_abort_cb.isChecked():
-            return  # Simulate NoConnAbort: stop sending heartbeats but keep receiving
+
         ip = self.target_ip_edit.text().strip()
         if not ip:
             self.send_status_label.setText("Send status: No target IP")
@@ -878,7 +1203,15 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             # 0 = internal 2.5V, 1 = VDD (e.g. 3.3V)
             ref_enum = 0 if self.ref_voltage <= 2.5 else 1
             enable_serial = 1 if self.enable_serial_printing_cb.isChecked() else 0
-            pkt = build_sensor_config_packet(necessary, controller_ip, reference_voltage=ref_enum, enable_serial_printing=enable_serial)
+            sensor_ids_text = self.sensor_ids_edit.text().strip()
+            sensor_ids = parse_sensor_ids_from_text(sensor_ids_text)
+            pkt = build_sensor_config_packet(
+                sensor_ids,
+                necessary,
+                controller_ip,
+                reference_voltage=ref_enum,
+                enable_serial_printing=enable_serial,
+            )
             self._send_sock.sendto(pkt, (ip, port))
         except Exception:
             pass
@@ -1072,6 +1405,12 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         self._save_leaderboard()
         self._server_heartbeat_timer.stop()
+        if self._ota_worker is not None:
+            try:
+                self._ota_worker.requestInterruption()
+                self._ota_worker.wait(2000)
+            except Exception:
+                pass
         if self._send_sock:
             try:
                 self._send_sock.close()

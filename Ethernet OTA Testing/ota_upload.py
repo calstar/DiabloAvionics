@@ -23,6 +23,7 @@ import struct
 import subprocess
 import sys
 import time
+import shutil
 
 # ── Defaults ──────────────────────────────────────────────────
 DEFAULT_IP       = "192.168.2.5"
@@ -45,6 +46,29 @@ def print_banner():
     print()
 
 
+def find_pio_command() -> str:
+    """Try to find the 'pio' command in PATH or common installation locations."""
+    # 1. Check if it's already in the environment PATH
+    pio_path = shutil.which("pio")
+    if pio_path:
+        return pio_path
+
+    # 2. Check common PlatformIO locations on Windows
+    if sys.platform == "win32":
+        user_profile = os.environ.get("USERPROFILE", "")
+        paths_to_check = [
+            os.path.join(user_profile, ".platformio", "penv", "Scripts", "pio.exe"),
+            os.path.join(user_profile, "AppData", "Local", "Programs", "Python", "Python313", "Scripts", "pio.exe"), # common alternative
+            "C:\\Python313\\Scripts\\pio.exe",
+        ]
+        for path in paths_to_check:
+            if os.path.isfile(path):
+                return path
+
+    # Fallback to just "pio" and hope for the best
+    return "pio"
+
+
 def compile_firmware(message: str) -> str:
     """Compile the firmware with the given OTA_MESSAGE baked in.
     
@@ -61,13 +85,14 @@ def compile_firmware(message: str) -> str:
     extra_flags = f'-DOTA_MESSAGE=\'"{escaped_msg}"\''
     env["PLATFORMIO_BUILD_FLAGS"] = extra_flags
 
-    print(f"[COMPILE] Running: pio run  (in {PROJECT_DIR})")
+    pio_cmd = find_pio_command()
+    print(f"[COMPILE] Running: {pio_cmd} run  (in {PROJECT_DIR})")
     print(f"[COMPILE] Extra build flags: {extra_flags}")
     print()
 
     try:
         result = subprocess.run(
-            ["pio", "run"],
+            [pio_cmd, "run"],
             cwd=PROJECT_DIR,
             env=env,
             capture_output=True,
@@ -171,7 +196,17 @@ def upload_firmware(bin_path: str, ip: str, port: int):
         elapsed = time.time() - start_time
         print()
         print(f"[UPLOAD] Transfer complete! {sent:,} bytes in {elapsed:.1f}s")
-        print(f"[UPLOAD] The ESP32 should now reboot with the new firmware.")
+        print(f"[UPLOAD] Waiting for ESP32 confirmation...")
+
+        try:
+            # Wait for "OK" response from ESP32
+            response = sock.recv(1024).decode(errors="ignore").strip()
+            if "OK" in response:
+                print(f"[UPLOAD] SUCCESS: ESP32 received firmware and is rebooting.")
+            else:
+                print(f"[UPLOAD] WARNING: Connection closed without 'OK' response. Response was: '{response}'")
+        except socket.timeout:
+            print(f"[UPLOAD] WARNING: Timed out waiting for 'OK' confirmation.")
 
     except socket.timeout:
         print(f"[UPLOAD] ERROR: Transfer timed out.")
