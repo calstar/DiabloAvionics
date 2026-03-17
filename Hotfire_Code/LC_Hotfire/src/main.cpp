@@ -177,10 +177,11 @@ static void run_self_test_cb(void*,
     std::vector<Diablo::SelfTestResult>& results_out) {
 
   // 1. ADC self-test (TDAC internal)
-  bool adc_ok = SensorSelfTest::run_adc_self_test(
+  auto adc_result = SensorSelfTest::run_adc_self_test(
       ads126x, Pins.ADC_DRDY_1,
       ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
-  results_out.push_back({0, adc_ok ? 1u : 0u});
+  results_out.push_back(Diablo::SelfTestResult{
+      0u, static_cast<uint8_t>(adc_result.passed ? 1 : 0)});
 
   // 2. Sensor bias continuity test
   SensorSelfTest::sensor_bias_enable(ads126x);
@@ -193,14 +194,16 @@ static void run_self_test_cb(void*,
     auto bias = SensorSelfTest::read_sensor_bias(
         ads126x, Pins.ADC_DRDY_1,
         static_cast<uint8_t>(ch1), static_cast<uint8_t>(ch2));
-    uint8_t pass = (bias == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
-    results_out.push_back({id, pass});
+    uint8_t pass = (bias.result == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
+    results_out.push_back(Diablo::SelfTestResult{id, pass});
   }
   SensorSelfTest::sensor_bias_disable(ads126x);
 }
 
 void setup() {
-  memset(&coreState, 0, sizeof(coreState));
+  // Do NOT memset coreState -- it contains IPAddress (has vtable via Printable)
+  // and EthernetUDP. memset zeroes vtable pointers, causing LoadProhibited
+  // crashes on virtual calls like Serial.print(IPAddress).
   coreState.gateway = IPAddress(0, 0, 0, 0);
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);

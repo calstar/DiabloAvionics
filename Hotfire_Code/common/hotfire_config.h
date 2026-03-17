@@ -25,7 +25,13 @@
 
 // Temporary: set to non-zero (1-254) to hardcode board ID and skip SPIFFS.
 // Set to 0 to use SPIFFS (normal). Easy to undo: set back to 0.
-#define TEMP_HARDCODE_BOARD_ID      14
+//
+// This value can be overridden from PlatformIO via a build flag, e.g.:
+//   build_flags = -DTEMP_HARDCODE_BOARD_ID=7
+// If no such build flag is provided, the default below is used.
+#ifndef TEMP_HARDCODE_BOARD_ID
+#define TEMP_HARDCODE_BOARD_ID      51
+#endif
 
 // Server (all hotfire boards send heartbeats/data here; hardcoded, not updated from packets)
 #define HOTFIRE_SERVER_IP_OCTET_4   20   // 192.168.2.20

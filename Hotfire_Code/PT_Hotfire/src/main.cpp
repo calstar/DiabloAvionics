@@ -162,31 +162,68 @@ static void send_chunks_to_cb(void*, IPAddress dest_ip, int dest_port,
                       abort_controller_ip, abort_controller_port);
 }
 
+static const char* bias_result_str(SensorSelfTest::BiasResult r) {
+  switch (r) {
+    case SensorSelfTest::BiasResult::CONNECTED:    return "CONNECTED";
+    case SensorSelfTest::BiasResult::AMBIGUOUS:    return "AMBIGUOUS";
+    case SensorSelfTest::BiasResult::DISCONNECTED: return "DISCONNECTED";
+    default:                                       return "?";
+  }
+}
+
 static void run_self_test_cb(void*,
     const SensorHotfire::StoredSensorConfig& cfg,
     std::vector<Diablo::SelfTestResult>& results_out) {
 
   // 1. ADC self-test (TDAC internal)
-  bool adc_ok = SensorSelfTest::run_adc_self_test(
+  auto adc_result = SensorSelfTest::run_adc_self_test(
       ads126x, Pins.ADC_DRDY_1,
       ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
-  results_out.push_back({0, adc_ok ? 1u : 0u});
+  results_out.push_back(Diablo::SelfTestResult{
+      0u, static_cast<uint8_t>(adc_result.passed ? 1 : 0)});
+
+  Serial.println("=== ADC TDAC Self-Test ===");
+  Serial.print("  read code  = "); Serial.println(adc_result.code);
+  Serial.print("  expected   = "); Serial.println(SensorSelfTest::ADC_TDAC_EXPECTED_CODE);
+  Serial.print("  tolerance  = "); Serial.println(SensorSelfTest::ADC_TDAC_TOLERANCE);
+  Serial.print("  checksum   = "); Serial.println(adc_result.checksum_valid ? "OK" : "FAIL");
+  Serial.print("  result     = "); Serial.println(adc_result.passed ? "PASS" : "FAIL");
+  Serial.flush();
 
   // 2. Sensor bias continuity test
+  Serial.println("=== Sensor Bias Test ===");
   SensorSelfTest::sensor_bias_enable(ads126x);
   for (uint8_t i = 0; i < cfg.num_sensors; i++) {
     uint8_t id = cfg.sensor_ids[i];
+    int channel = getAdcChannel(id, TEST_PIN);
+    if (channel < 0) {
+      Serial.print("  sensor id="); Serial.print(id);
+      Serial.println("  channel=INVALID  result=FAIL");
+      results_out.push_back(Diablo::SelfTestResult{id, 0u});
+      continue;
+    }
     auto bias = SensorSelfTest::read_sensor_bias(
         ads126x, Pins.ADC_DRDY_1,
-        getAdcChannel(id, TEST_PIN), ADS126X_AINCOM);
-    uint8_t pass = (bias == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
-    results_out.push_back({id, pass});
+        static_cast<uint8_t>(channel), ADS126X_AINCOM);
+    uint8_t pass = (bias.result == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
+
+    Serial.print("  sensor id="); Serial.print(id);
+    Serial.print("  ch="); Serial.print(channel);
+    Serial.print("  code="); Serial.print(bias.code);
+    Serial.print("  chk="); Serial.print(bias.checksum_valid ? "OK" : "FAIL");
+    Serial.print("  -> "); Serial.println(bias_result_str(bias.result));
+
+    results_out.push_back(Diablo::SelfTestResult{id, pass});
   }
+  Serial.flush();
   SensorSelfTest::sensor_bias_disable(ads126x);
 }
 
 void setup() {
-  memset(&coreState, 0, sizeof(coreState));
+  // Do NOT memset coreState -- it contains IPAddress (has vtable via Printable)
+  // and EthernetUDP. memset zeroes vtable pointers, causing LoadProhibited
+  // crashes on virtual calls like Serial.print(IPAddress).
+  // Static variables are already zero-initialized for POD members.
   coreState.gateway = IPAddress(0, 0, 0, 0);
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);
@@ -196,6 +233,7 @@ void setup() {
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
+  // Re-enable self-test now that we guard invalid mappings.
   coreConfig.run_self_test = run_self_test_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
   coreConfig.user_data = nullptr;

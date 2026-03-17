@@ -66,6 +66,7 @@ PacketType = type('PacketType', (), {
     'ABORT': 7,
     'CLEAR_ABORT': 9,
     'NO_CONNECTION_ABORT': 11,
+    'SELF_TEST': 12,
 })()
 BoardState = type('BoardState', (), {
     'SETUP': 1, 'ACTIVE': 2,
@@ -126,12 +127,13 @@ class OTAWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(bool, str)
 
-    def __init__(self, project_dir: Path, env_name: str, ip: str, port: int):
+    def __init__(self, project_dir: Path, env_name: str, ip: str, port: int, board_id: Optional[int] = None):
         super().__init__()
         self._project_dir = project_dir
         self._env_name = env_name
         self._ip = ip
         self._port = port
+        self._board_id = board_id
 
     def run(self):
         try:
@@ -139,7 +141,7 @@ class OTAWorker(QtCore.QThread):
                 self.finished.emit(False, "OTA cancelled.")
                 return
             self.progress.emit("[OTA] Compiling firmware...")
-            bin_path = compile_firmware(self._project_dir, self._env_name)
+            bin_path = compile_firmware(self._project_dir, self._env_name, board_id=self._board_id)
             if self.isInterruptionRequested():
                 self.finished.emit(False, "OTA cancelled.")
                 return
@@ -182,6 +184,48 @@ def parse_board_heartbeat_packet(data: bytes) -> Optional[Tuple[tuple, bytes, in
         return None
     # body: (firmware_hash_bytes, board_id, engine_state, board_state)
     return (header, body[0], body[1], body[2], body[3])
+
+
+def parse_self_test_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
+    """
+    Parse SELF_TEST packet sent by Hotfire boards.
+
+    Wire format (after 6-byte header):
+      - uint8  adc_good
+      - uint8  num_sensors (N)
+      - N * (uint8 sensor_id, uint8 result)
+    """
+    if len(data) < PACKET_HEADER_SIZE + 2:
+        return None
+    header = parse_packet_header(data)
+    if header is None or header[0] != PacketType.SELF_TEST:
+        return None
+    offset = PACKET_HEADER_SIZE
+    try:
+        adc_good = data[offset]
+        num_sensors = data[offset + 1]
+    except IndexError:
+        return None
+    offset += 2
+    expected_size = PACKET_HEADER_SIZE + 2 + (num_sensors * 2)
+    if len(data) < expected_size:
+        return None
+    results: List[dict] = []
+    for _ in range(num_sensors):
+        if offset + 2 > len(data):
+            return None
+        sensor_id = data[offset]
+        result = data[offset + 1]
+        results.append({"sensor_id": sensor_id, "result": result})
+        offset += 2
+    header_dict = {
+        "packet_type": header[0],
+        "version": header[1],
+        "timestamp": header[2],
+        "adc_good": adc_good,
+        "num_sensors": num_sensors,
+    }
+    return (header_dict, results)
 
 
 def board_state_name(state: int) -> str:
@@ -343,12 +387,30 @@ def find_pio_command() -> str:
     return "pio"
 
 
-def compile_firmware(project_dir: Path, env_name: str) -> Path:
-    """Compile a PlatformIO project and return firmware.bin path."""
+def compile_firmware(project_dir: Path, env_name: str, board_id: Optional[int] = None) -> Path:
+    """Compile a PlatformIO project and return firmware.bin path.
+
+    If board_id is provided, append a TEMP_HARDCODE_BOARD_ID build flag so Hotfire
+    firmware uses that ID instead of SPIFFS/default. This is done via the
+    PLATFORMIO_BUILD_FLAGS environment variable so it doesn't require changes
+    to platformio.ini.
+    """
     env = os.environ.copy()
+    if board_id is not None:
+        try:
+            bid = int(board_id)
+        except (TypeError, ValueError):
+            bid = None
+        if bid is not None and 0 <= bid <= 254:
+            extra_flag = f"-DTEMP_HARDCODE_BOARD_ID={bid}"
+            existing = env.get("PLATFORMIO_BUILD_FLAGS", "").strip()
+            env["PLATFORMIO_BUILD_FLAGS"] = f"{existing} {extra_flag}".strip() if existing else extra_flag
     pio_cmd = find_pio_command()
+    cmd = [pio_cmd, "run"]
+    if env_name:
+        cmd += ["-e", env_name]
     result = subprocess.run(
-        [pio_cmd, "run"],
+        cmd,
         cwd=str(project_dir),
         env=env,
         capture_output=True,
@@ -525,6 +587,7 @@ class UDPReceiver(QtCore.QThread):
     sensor_data_packet_status = QtCore.pyqtSignal(str, bool)  # source_ip, parsed_ok (True=ok, False=malformed)
     board_heartbeat_received = QtCore.pyqtSignal(float, int, int, int, str, bytes)  # timestamp, board_id, board_state, engine_state, source_ip, firmware_hash
     status_update = QtCore.pyqtSignal(str)
+    self_test_received = QtCore.pyqtSignal(dict, list, str)  # header_dict, results, source_ip
 
     def __init__(self, port: int, bind_address: str = '0.0.0.0', sock: Optional[socket.socket] = None):
         super().__init__()
@@ -586,6 +649,11 @@ class UDPReceiver(QtCore.QThread):
                         self.board_heartbeat_received.emit(
                             time.time(), board_id, board_state, engine_state, addr[0], firmware_hash
                         )
+                elif header[0] == PacketType.SELF_TEST:
+                    result = parse_self_test_packet(data)
+                    if result:
+                        header_dict, results = result
+                        self.self_test_received.emit(header_dict, results, addr[0])
                 elif header[0] == PacketType.SENSOR_DATA:
                     result = parse_sensor_data_packet(data)
                     self.sensor_data_packet_status.emit(addr[0], result is not None)
@@ -808,6 +876,16 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.sensor_data_status_label = QtWidgets.QLabel("Sensor data packets: —")
         self.sensor_data_status_label.setStyleSheet("color: #8ab; font-size: 11px;")
         board_layout.addWidget(self.sensor_data_status_label)
+        # Self-test results (from SELF_TEST packets)
+        self.self_test_label = QtWidgets.QLabel("Self-test: —")
+        self.self_test_label.setStyleSheet("font-weight: bold;")
+        board_layout.addWidget(self.self_test_label)
+        self.self_test_adc_label = QtWidgets.QLabel("ADC: —")
+        board_layout.addWidget(self.self_test_adc_label)
+        self.self_test_results_list = QtWidgets.QListWidget()
+        self.self_test_results_list.setMaximumHeight(80)
+        self.self_test_results_list.setStyleSheet("font-size: 11px;")
+        board_layout.addWidget(self.self_test_results_list)
         board_layout.addStretch()
         content.addWidget(board_panel)
 
@@ -853,7 +931,21 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         sens_layout.addWidget(QtWidgets.QLabel("Sensor IDs (comma-separated):"))
         self.sensor_ids_edit = QtWidgets.QLineEdit()
         self.sensor_ids_edit.setPlaceholderText("e.g. 1,2,3,10  (leave empty for board default)")
+        self.sensor_ids_edit.setText("1,2,3,4,5,6,7,8,9,10")
         sens_layout.addWidget(self.sensor_ids_edit)
+        sens_layout.addWidget(QtWidgets.QLabel("Reference voltage:"))
+        self.ref_voltage_combo = QtWidgets.QComboBox()
+        self.ref_voltage_combo.addItem("Internal 2.5 V", 0)
+        self.ref_voltage_combo.addItem("VDD (e.g. 3.3 V)", 1)
+        self.ref_voltage_combo.addItem("Ignore / board default", 2)
+        self.ref_voltage_combo.setCurrentIndex(0)
+        self.ref_voltage_combo.setToolTip(
+            "Reference voltage enum sent in SENSOR_CONFIG:\n"
+            " - Internal 2.5 V\n"
+            " - VDD (e.g. 3.3 V)\n"
+            " - Ignore / board default"
+        )
+        sens_layout.addWidget(self.ref_voltage_combo)
         sens_layout.addWidget(QtWidgets.QLabel("Actuator controller IP:"))
         self.actuator_ip_edit = QtWidgets.QLineEdit()
         self.actuator_ip_edit.setPlaceholderText("192.168.2.20")
@@ -936,6 +1028,18 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         ota_port_row.addWidget(self.ota_port_spin)
         ota_layout.addLayout(ota_port_row)
 
+        ota_board_id_row = QtWidgets.QHBoxLayout()
+        ota_board_id_row.addWidget(QtWidgets.QLabel("Board ID for OTA:"))
+        self.ota_board_id_spin = QtWidgets.QSpinBox()
+        self.ota_board_id_spin.setRange(0, 254)
+        self.ota_board_id_spin.setValue(0)
+        self.ota_board_id_spin.setToolTip(
+            "Board ID to compile into firmware via TEMP_HARDCODE_BOARD_ID.\n"
+            "0 = use board's SPIFFS/default ID (no override)."
+        )
+        ota_board_id_row.addWidget(self.ota_board_id_spin)
+        ota_layout.addLayout(ota_board_id_row)
+
         self.ota_upload_btn = QtWidgets.QPushButton("Compile && Upload")
         self.ota_upload_btn.setToolTip("Compile selected PlatformIO project and upload firmware via Ethernet OTA to the Target IP.")
         self.ota_upload_btn.clicked.connect(self._on_ota_compile_and_upload_clicked)
@@ -1003,6 +1107,7 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.receiver.sensor_data_received.connect(self._on_sensor_data)
         self.receiver.sensor_data_packet_status.connect(self._on_sensor_data_packet_status)
         self.receiver.board_heartbeat_received.connect(self._on_board_heartbeat)
+        self.receiver.self_test_received.connect(self._on_self_test_results)
         self.receiver.status_update.connect(self.status_label.setText)
         self.receiver.start()
         self.stats_start_time = time.time()
@@ -1044,12 +1149,17 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self.ota_log.appendPlainText("[OTA] Error: set Target IP first.")
             return
         port = int(self.ota_port_spin.value())
+        board_id_val = int(self.ota_board_id_spin.value())
+        board_id_opt: Optional[int] = board_id_val if board_id_val > 0 else None
 
         self.ota_log.clear()
-        self.ota_log.appendPlainText(f"[OTA] Starting — target {ip}:{port}")
+        if board_id_opt is not None:
+            self.ota_log.appendPlainText(f"[OTA] Starting — target {ip}:{port}, board ID {board_id_opt}")
+        else:
+            self.ota_log.appendPlainText(f"[OTA] Starting — target {ip}:{port} (no board ID override)")
         self.ota_upload_btn.setEnabled(False)
 
-        self._ota_worker = OTAWorker(project_dir, env_name, ip, port)
+        self._ota_worker = OTAWorker(project_dir, env_name, ip, port, board_id=board_id_opt)
         self._ota_worker.progress.connect(self._on_ota_progress)
         self._ota_worker.finished.connect(self._on_ota_finished)
         self._ota_worker.start()
@@ -1170,7 +1280,36 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         short_hex = full_hex[:16] + "..."
         self.firmware_hash_label.setText(f"Firmware hash: {short_hex}")
         self.firmware_hash_label.setToolTip(f"SHA-256: {full_hex}")
-        # Do not auto-fill Target IP — user's value is always used for Send sensor config / abort / heartbeat
+        # Auto-fill Target IP to the IP we are receiving heartbeats from so commands go back to that board.
+        # User can still override this manually in the GUI.
+        self.target_ip_edit.setText(source_ip)
+
+    def _on_self_test_results(self, header: dict, results: list, source_ip: str):
+        """
+        Update the self-test UI when a SELF_TEST packet is received.
+
+        header: {'packet_type', 'version', 'timestamp', 'adc_good', 'num_sensors}
+        results: [{'sensor_id': uint8, 'result': uint8}, ...]
+        """
+        self.self_test_label.setText(f"Self-test: from {source_ip}")
+
+        adc_good = bool(header.get("adc_good", 0))
+        if adc_good:
+            self.self_test_adc_label.setText("ADC: PASS")
+            self.self_test_adc_label.setStyleSheet("font-weight: bold; color: #2ecc71;")
+        else:
+            self.self_test_adc_label.setText("ADC: FAIL")
+            self.self_test_adc_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+
+        self.self_test_results_list.clear()
+        for entry in results:
+            sensor_id = entry.get("sensor_id", 0)
+            passed = bool(entry.get("result", 0))
+            text = f"Sensor {sensor_id}: {'PASS' if passed else 'FAIL'}"
+            item = QtWidgets.QListWidgetItem(text)
+            color = QtGui.QColor("#2ecc71" if passed else "#e74c3c")
+            item.setForeground(color)
+            self.self_test_results_list.addItem(item)
 
     def _on_send_heartbeat_changed(self, state):
         if state == QtCore.Qt.CheckState.Checked.value:
@@ -1200,8 +1339,11 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             port = self.target_port_spin.value()
             necessary = self.necessary_for_abort_cb.isChecked()
             controller_ip = self.actuator_ip_edit.text().strip() or None
-            # 0 = internal 2.5V, 1 = VDD (e.g. 3.3V)
-            ref_enum = 0 if self.ref_voltage <= 2.5 else 1
+            # 0 = internal 2.5V, 1 = VDD (e.g. 3.3V), 2 = ignore/board default
+            ref_index = self.ref_voltage_combo.currentIndex()
+            ref_enum = self.ref_voltage_combo.itemData(ref_index)
+            if ref_enum is None:
+                ref_enum = 0
             enable_serial = 1 if self.enable_serial_printing_cb.isChecked() else 0
             sensor_ids_text = self.sensor_ids_edit.text().strip()
             sensor_ids = parse_sensor_ids_from_text(sensor_ids_text)

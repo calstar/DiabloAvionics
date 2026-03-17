@@ -462,14 +462,19 @@ inline void loop(CoreState& s, const Config& cfg) {
     if (cfg.collect_chunk)
       cfg.collect_chunk(cfg.user_data);
   } else if (s.state == State::SelfTest) {
-    // Blocking self text execution
     if (cfg.run_self_test) {
       std::vector<Diablo::SelfTestResult> results;
       cfg.run_self_test(cfg.user_data, s.stored_config, results);
 
-      // Create and send packet
+      uint8_t adc_good = 0;
+      if (!results.empty() && results[0].sensor_id == 0) {
+        adc_good = results[0].result;
+        results.erase(results.begin());
+      }
+
       uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
-      size_t packetSize = Diablo::create_self_test_packet(results, packetBuffer, sizeof(packetBuffer));
+      size_t packetSize =
+          Diablo::create_self_test_packet(adc_good, results, packetBuffer, sizeof(packetBuffer));
       if (packetSize > 0) {
         s.udp.beginPacket(s.serverIP, s.serverPort);
         s.udp.write(packetBuffer, packetSize);
@@ -480,7 +485,6 @@ inline void loop(CoreState& s, const Config& cfg) {
         SENSOR_HOTFIRE_PRINTLN(s.serverPort);
       }
     }
-    // Automatically transition to Active after test
     s.state = State::Active;
     Serial.println("State -> Active");
     Serial.flush();
