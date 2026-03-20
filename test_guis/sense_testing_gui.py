@@ -766,6 +766,11 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.show_force_lc_cb.stateChanged.connect(self._on_show_force_lc_changed)
         toolbar.addWidget(self.show_force_lc_cb)
 
+        self.show_encoder_angle_cb = QtWidgets.QCheckBox("Show angle (encoder)")
+        self.show_encoder_angle_cb.setToolTip("Interpret raw uint32 as AS5600 12-bit angle (0–4095) and display as degrees (0–360°).")
+        self.show_encoder_angle_cb.stateChanged.connect(self._on_show_encoder_angle_changed)
+        toolbar.addWidget(self.show_encoder_angle_cb)
+
         toolbar.addSpacing(20)
         self.status_label = QtWidgets.QLabel("Starting…")
         self.status_label.setStyleSheet("color: #aaa;")
@@ -1181,6 +1186,8 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self.show_temp_pt1000_cb.setChecked(False)
         if self.show_temperature_k_type and self.show_force_lc_cb.isChecked():
             self.show_force_lc_cb.setChecked(False)
+        if self.show_temperature_k_type and self.show_encoder_angle_cb.isChecked():
+            self.show_encoder_angle_cb.setChecked(False)
 
     def _on_show_temperature_pt1000_changed(self, state):
         from PyQt6.QtCore import Qt
@@ -1189,6 +1196,8 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             self.show_temp_k_cb.setChecked(False)
         if self.show_temperature_pt1000 and self.show_force_lc_cb.isChecked():
             self.show_force_lc_cb.setChecked(False)
+        if self.show_temperature_pt1000 and self.show_encoder_angle_cb.isChecked():
+            self.show_encoder_angle_cb.setChecked(False)
 
     def _on_show_force_lc_changed(self, state):
         from PyQt6.QtCore import Qt
@@ -1197,6 +1206,18 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
                 self.show_temp_k_cb.setChecked(False)
             if self.show_temp_pt1000_cb.isChecked():
                 self.show_temp_pt1000_cb.setChecked(False)
+            if self.show_encoder_angle_cb.isChecked():
+                self.show_encoder_angle_cb.setChecked(False)
+
+    def _on_show_encoder_angle_changed(self, state):
+        from PyQt6.QtCore import Qt
+        if state == Qt.CheckState.Checked.value:
+            if self.show_temp_k_cb.isChecked():
+                self.show_temp_k_cb.setChecked(False)
+            if self.show_temp_pt1000_cb.isChecked():
+                self.show_temp_pt1000_cb.setChecked(False)
+            if self.show_force_lc_cb.isChecked():
+                self.show_force_lc_cb.setChecked(False)
 
     def _on_add_max_force_to_leaderboard(self):
         """Find max force in current time window and add (name, force) to leaderboard."""
@@ -1470,8 +1491,11 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         use_pt1000 = self.show_temp_pt1000_cb.isChecked()
         use_k_type = self.show_temp_k_cb.isChecked()
         use_force = self.show_force_lc_cb.isChecked()
+        use_encoder = self.show_encoder_angle_cb.isChecked()
         _label_style = {'color': '#FFFFFF', 'font-size': '11pt'}
-        if use_force:
+        if use_encoder:
+            self.plot_widget.setLabel("left", "Angle (°)", **_label_style)
+        elif use_force:
             self.plot_widget.setLabel("left", "Force", **_label_style)
         elif use_pt1000:
             self.plot_widget.setLabel("left", "Temperature (°C)", **_label_style)
@@ -1509,7 +1533,11 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
             times, values = [], []
             for t, code in data_deque:
                 if current_time - t <= time_window:
-                    if use_force:
+                    if use_encoder:
+                        angle = (code & 0x0FFF) * 360.0 / 4096.0
+                        times.append(t)
+                        values.append(angle)
+                    elif use_force:
                         exc = self.lc_excitation_spin.value()
                         sens = self.lc_sensitivity_spin.value()
                         pga = self.lc_pga_gain_spin.value()
