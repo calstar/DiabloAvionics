@@ -19,9 +19,10 @@
 #define LED_BLINK_ON_MS              100
 #define LED_BLINK_OFF_MS             100
 
-// Board identity (SPIFFS)
-#define SPIFFS_BOARD_VALUE_PATH     "/value.bin"
-#define BOARD_ID_DEFAULT            1
+// Board identity
+#ifndef BOARD_ID
+#define BOARD_ID 42
+#endif
 
 // Temporary: set to non-zero (1-254) to hardcode board ID and skip SPIFFS.
 // Set to 0 to use SPIFFS (normal). Easy to undo: set back to 0.
@@ -31,6 +32,11 @@
 // If no such build flag is provided, the default below is used.
 #ifndef TEMP_HARDCODE_BOARD_ID
 #define TEMP_HARDCODE_BOARD_ID      51
+#endif
+
+// Safety Configuration
+#ifndef ENABLE_ALL_STATE_TRANSITIONS
+#define ENABLE_ALL_STATE_TRANSITIONS false
 #endif
 
 // Server (all hotfire boards send heartbeats/data here; hardcoded, not updated from packets)
