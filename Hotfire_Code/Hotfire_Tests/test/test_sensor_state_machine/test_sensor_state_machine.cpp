@@ -26,9 +26,10 @@
 namespace SensorSM {
 
 enum class State : uint8_t {
-    WaitingForServer = 0,
-    Active = 1,
-    StandaloneAbort = 2
+    WaitingForServer = 1,
+    Active = 2,
+    StandaloneAbort = 9,
+    SelfTest = 10
 };
 
 enum class IncomingPacketKind {
@@ -52,11 +53,15 @@ struct StoredConfig {
 
 // Replicate applyPacketTransition from SensorHotfireCore.h
 static State applyPacketTransition(State state, IncomingPacketKind kind,
-                                    bool necessary_for_abort) {
+                                    bool necessary_for_abort, bool run_self_test) {
     switch (state) {
         case State::WaitingForServer:
             if (kind == IncomingPacketKind::SensorConfig) {
-                return State::Active;
+                if (run_self_test) {
+                    return State::SelfTest;
+                } else {
+                    return State::Active;
+                }
             }
             break;
         case State::Active:
@@ -124,6 +129,7 @@ static Diablo::BoardState getBoardStateForHeartbeat(State state) {
         case State::WaitingForServer: return Diablo::BoardState::SETUP;
         case State::Active:           return Diablo::BoardState::ACTIVE;
         case State::StandaloneAbort:  return Diablo::BoardState::STANDALONE_ABORT;
+        case State::SelfTest:         return Diablo::BoardState::SELF_TEST;
         default:                      return Diablo::BoardState::SETUP;
     }
 }
@@ -142,49 +148,56 @@ void test_sensor_initial_state() {
 void test_sensor_config_transitions_to_active() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::WaitingForServer,
-        SensorSM::IncomingPacketKind::SensorConfig, false);
+        SensorSM::IncomingPacketKind::SensorConfig, false, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::Active, (int)next);
+}
+
+void test_sensor_config_transitions_to_selftest() {
+    auto next = SensorSM::applyPacketTransition(
+        SensorSM::State::WaitingForServer,
+        SensorSM::IncomingPacketKind::SensorConfig, false, true);
+    TEST_ASSERT_EQUAL((int)SensorSM::State::SelfTest, (int)next);
 }
 
 void test_sensor_heartbeat_stays_waiting() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::WaitingForServer,
-        SensorSM::IncomingPacketKind::ServerHeartbeat, false);
+        SensorSM::IncomingPacketKind::ServerHeartbeat, false, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::WaitingForServer, (int)next);
 }
 
 void test_sensor_noconn_abort_with_necessary() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::Active,
-        SensorSM::IncomingPacketKind::NoConnAbort, true);
+        SensorSM::IncomingPacketKind::NoConnAbort, true, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::StandaloneAbort, (int)next);
 }
 
 void test_sensor_noconn_abort_without_necessary() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::Active,
-        SensorSM::IncomingPacketKind::NoConnAbort, false);
+        SensorSM::IncomingPacketKind::NoConnAbort, false, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::Active, (int)next);
 }
 
 void test_sensor_clear_abort_returns_to_active() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::StandaloneAbort,
-        SensorSM::IncomingPacketKind::ClearAbort, true);
+        SensorSM::IncomingPacketKind::ClearAbort, true, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::Active, (int)next);
 }
 
 void test_sensor_clear_abort_in_active_stays() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::Active,
-        SensorSM::IncomingPacketKind::ClearAbort, false);
+        SensorSM::IncomingPacketKind::ClearAbort, false, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::Active, (int)next);
 }
 
 void test_sensor_none_packet_doesnt_transition() {
     auto next = SensorSM::applyPacketTransition(
         SensorSM::State::Active,
-        SensorSM::IncomingPacketKind::None, false);
+        SensorSM::IncomingPacketKind::None, false, false);
     TEST_ASSERT_EQUAL((int)SensorSM::State::Active, (int)next);
 }
 
@@ -276,6 +289,7 @@ void test_sensor_heartbeat_state_mapping_table() {
         { SensorSM::State::WaitingForServer, Diablo::BoardState::SETUP },
         { SensorSM::State::Active,           Diablo::BoardState::ACTIVE },
         { SensorSM::State::StandaloneAbort,  Diablo::BoardState::STANDALONE_ABORT },
+        { SensorSM::State::SelfTest,         Diablo::BoardState::SELF_TEST },
     };
 
     for (auto& m : mappings) {
@@ -316,6 +330,7 @@ int main(int argc, char **argv) {
     // State transitions
     RUN_TEST(test_sensor_initial_state);
     RUN_TEST(test_sensor_config_transitions_to_active);
+    RUN_TEST(test_sensor_config_transitions_to_selftest);
     RUN_TEST(test_sensor_heartbeat_stays_waiting);
     RUN_TEST(test_sensor_noconn_abort_with_necessary);
     RUN_TEST(test_sensor_noconn_abort_without_necessary);
