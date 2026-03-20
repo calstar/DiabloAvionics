@@ -15,7 +15,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <SPIFFS.h>
+
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <DAQv2-Comms.h>
@@ -300,23 +300,6 @@ inline void updateStateLed(CoreState& s, const Config& cfg, int state_num) {
   }
 }
 
-inline bool loadBoardIdFromSpiffs(CoreState& s, const char* path, uint8_t default_id) {
-  if (!SPIFFS.begin(false)) return false;
-  File f = SPIFFS.open(path, "r");
-  if (!f || f.available() < 1) {
-    if (f) f.close();
-    SPIFFS.end();
-    return false;
-  }
-  uint8_t b;
-  bool ok = (f.read(&b, 1) == 1);
-  f.close();
-  SPIFFS.end();
-  if (!ok) return false;
-  s.board_id = b;
-  s.staticIP = IPAddress(192, 168, 2, b);
-  return true;
-}
 
 inline void setup(CoreState& s, const Config& cfg) {
   Serial.begin(115200);
@@ -324,25 +307,12 @@ inline void setup(CoreState& s, const Config& cfg) {
   SENSOR_HOTFIRE_PRINT(cfg.board_name);
   SENSOR_HOTFIRE_PRINTLN(" Hotfire state machine starting...");
 
-#if TEMP_HARDCODE_BOARD_ID
-  s.board_id = (uint8_t)TEMP_HARDCODE_BOARD_ID;
-  s.staticIP = IPAddress(192, 168, 2, (uint8_t)TEMP_HARDCODE_BOARD_ID);
-  SENSOR_HOTFIRE_PRINT("Board ID and IP (temp hardcoded): ");
+  s.board_id = (uint8_t)BOARD_ID;
+  s.staticIP = IPAddress(192, 168, 2, (uint8_t)BOARD_ID);
+  SENSOR_HOTFIRE_PRINT("Board ID and IP: ");
   SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(s.board_id));
   SENSOR_HOTFIRE_PRINT(" / 192.168.2.");
   SENSOR_HOTFIRE_PRINTLN(static_cast<unsigned>(s.board_id));
-#else
-  if (!loadBoardIdFromSpiffs(s, SPIFFS_BOARD_VALUE_PATH, BOARD_ID_DEFAULT)) {
-    s.board_id = BOARD_ID_DEFAULT;
-    s.staticIP = IPAddress(192, 168, 2, BOARD_ID_DEFAULT);
-    SENSOR_HOTFIRE_PRINTLN("SPIFFS read skipped or failed, using default board ID 1 / 192.168.2.1");
-  } else {
-    SENSOR_HOTFIRE_PRINT("Board ID and IP from SPIFFS: ");
-    SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(s.board_id));
-    SENSOR_HOTFIRE_PRINT(" / 192.168.2.");
-    SENSOR_HOTFIRE_PRINTLN(static_cast<unsigned>(s.board_id));
-  }
-#endif
 
   const sense_board_pins::Layout& Pins = *cfg.pins;
   pinMode(Pins.LED, OUTPUT);

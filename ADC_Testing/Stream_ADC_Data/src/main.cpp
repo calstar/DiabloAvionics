@@ -7,7 +7,7 @@
 #include "STAR_ADS126X.h"
 #include "main.h"
 #include "adc_mappings.h"
-#include "esp_mac.h"s 
+#include "esp_mac.h" 
 
 
 

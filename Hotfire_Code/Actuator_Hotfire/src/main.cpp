@@ -8,7 +8,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <SPIFFS.h>
+
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <DAQv2-Comms.h>
@@ -27,9 +27,9 @@ using namespace actuator_board_pins;
 //-----------------------------------------------------------------------------
 // Board identity and network
 //-----------------------------------------------------------------------------
-static uint8_t board_id = BOARD_ID_DEFAULT;
+static uint8_t board_id = BOARD_ID;
 byte mac[6];
-IPAddress staticIP(192, 168, 2, BOARD_ID_DEFAULT);
+IPAddress staticIP(192, 168, 2, BOARD_ID);
 IPAddress gateway(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
@@ -752,8 +752,8 @@ static void run_WaitingForServer() {
 
 static void run_Active() {
   streamSensorDataIfDue();
-  // Stay in Active: no transition on connection loss (code kept but unreachable).
-  if (false && heartbeatTimedOut()) {
+  // Stay in Active: no transition on connection loss (unless ENABLE_ALL_STATE_TRANSITIONS config allows it).
+  if (ENABLE_ALL_STATE_TRANSITIONS && heartbeatTimedOut()) {
     setState(ActuatorControllerState::ConnectionLossDetected);
     connection_loss_received_ips.clear();
   }
@@ -880,8 +880,8 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case ActuatorControllerState::Active:
-      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (code kept but unreachable).
-      if (false) {
+      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (unless config allows).
+      if (ENABLE_ALL_STATE_TRANSITIONS) {
         if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
           setState(ActuatorControllerState::AbortFinished);
         } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
@@ -942,31 +942,12 @@ void setup() {
   FirmwareHash::print();
   Serial.println("Actuator Hotfire starting...");
 
-#if TEMP_HARDCODE_BOARD_ID
-  board_id = (uint8_t)TEMP_HARDCODE_BOARD_ID;
-  staticIP = IPAddress(192, 168, 2, (uint8_t)TEMP_HARDCODE_BOARD_ID);
-  Serial.print("Board ID and IP (temp hardcoded): ");
+  board_id = (uint8_t)BOARD_ID;
+  staticIP = IPAddress(192, 168, 2, (uint8_t)BOARD_ID);
+  Serial.print("Board ID and IP: ");
   Serial.print(static_cast<unsigned>(board_id));
   Serial.print(" / 192.168.2.");
   Serial.println(static_cast<unsigned>(board_id));
-#else
-  if (SPIFFS.begin(false)) {
-    File f = SPIFFS.open(SPIFFS_BOARD_VALUE_PATH, "r");
-    if (f && f.available() >= 1) {
-      uint8_t b;
-      if (f.read(&b, 1) == 1) {
-        board_id = b;
-        staticIP = IPAddress(192, 168, 2, b);
-        Serial.print("Board ID and IP from SPIFFS: ");
-        Serial.print(static_cast<unsigned>(board_id));
-        Serial.print(" / 192.168.2.");
-        Serial.println(static_cast<unsigned>(b));
-      }
-    }
-    if (f) f.close();
-    SPIFFS.end();
-  }
-#endif
 
   initializeActuators();
   initializeCurrentSensePins();

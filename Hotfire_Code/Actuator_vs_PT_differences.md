@@ -2,13 +2,13 @@
 
 ## 1. **Same hardcoded board ID → IP conflict (most likely)**
 
-- **Config:** Both use `hotfire_config.h` → `TEMP_HARDCODE_BOARD_ID` is **22** for both.
+- **Config:** Both use `hotfire_config.h`. You must define `BOARD_ID` appropriately for each board at compile time.
 - **Actuator:** `staticIP = 192.168.2.22` (when hardcoded).
 - **PT (SensorHotfireCore):** `s.staticIP = 192.168.2.22` (same).
 
 If both boards are flashed with this config, **both try to use 192.168.2.22**. Only one can own that IP on the LAN. The other either fails to get link or shares the IP and only one receives traffic. So when the server sends to “PT” at 192.168.2.22, that might be the same IP as the actuator; the actuator gets the packet and the PT never does.
 
-**Fix:** Give PT and actuator different board IDs (e.g. actuator 21, PT 22), either by different `TEMP_HARDCODE_BOARD_ID` in separate builds or by using SPIFFS on one of them.
+**Fix:** Give PT and actuator different board IDs (e.g. actuator 21, PT 22), by defining `BOARD_ID` via their respective platformio.ini files or build scripts.
 
 ---
 
