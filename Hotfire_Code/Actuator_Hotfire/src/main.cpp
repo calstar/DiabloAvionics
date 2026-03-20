@@ -8,7 +8,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <SPIFFS.h>
+
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <DAQv2-Comms.h>
@@ -27,9 +27,9 @@ using namespace actuator_board_pins;
 //-----------------------------------------------------------------------------
 // Board identity and network
 //-----------------------------------------------------------------------------
-static uint8_t board_id = BOARD_ID_DEFAULT;
+static uint8_t board_id = BOARD_ID;
 byte mac[6];
-IPAddress staticIP(192, 168, 2, BOARD_ID_DEFAULT);
+IPAddress staticIP(192, 168, 2, BOARD_ID);
 IPAddress gateway(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(192, 168, 2, 1);
@@ -50,15 +50,15 @@ static bool g_actuator_serial = true;
 //-----------------------------------------------------------------------------
 // State machine
 //-----------------------------------------------------------------------------
-enum class ActuatorControllerState {
-  WaitingForServer,
-  Active,
-  NoConnectionAbort,
-  PTAbort,
-  NoPTAbort,
-  AbortFinished,
-  ConnectionLossDetected,
-  NoConnAbortFollower
+enum class ActuatorControllerState : uint8_t {
+  WaitingForServer = 1, // SETUP
+  Active = 2,
+  ConnectionLossDetected = 3,
+  NoConnectionAbort = 4,
+  NoConnAbortFollower = 5,
+  PTAbort = 6,
+  NoPTAbort = 7,
+  AbortFinished = 8
 };
 
 static ActuatorControllerState state = ActuatorControllerState::WaitingForServer;
@@ -120,17 +120,7 @@ static unsigned long led_phase_start_ms = 0;
 static ActuatorControllerState last_led_state = ActuatorControllerState::WaitingForServer;
 
 static uint8_t getStateNumber(ActuatorControllerState s) {
-  switch (s) {
-    case ActuatorControllerState::WaitingForServer:   return 1;
-    case ActuatorControllerState::Active:             return 2;
-    case ActuatorControllerState::ConnectionLossDetected: return 3;
-    case ActuatorControllerState::NoConnectionAbort: return 4;
-    case ActuatorControllerState::NoConnAbortFollower: return 5;
-    case ActuatorControllerState::PTAbort:           return 6;
-    case ActuatorControllerState::NoPTAbort:         return 7;
-    case ActuatorControllerState::AbortFinished:     return 8;
-    default: return 1;
-  }
+  return static_cast<uint8_t>(s);
 }
 
 static const char* stateName(ActuatorControllerState s) {
@@ -752,8 +742,8 @@ static void run_WaitingForServer() {
 
 static void run_Active() {
   streamSensorDataIfDue();
-  // Stay in Active: no transition on connection loss (code kept but unreachable).
-  if (false && heartbeatTimedOut()) {
+  // Stay in Active: no transition on connection loss (unless ENABLE_ALL_STATE_TRANSITIONS config allows it).
+  if (ENABLE_ALL_STATE_TRANSITIONS && heartbeatTimedOut()) {
     setState(ActuatorControllerState::ConnectionLossDetected);
     connection_loss_received_ips.clear();
   }
@@ -880,8 +870,8 @@ static void applyPacketTransition(IncomingPacketKind kind) {
       }
       break;
     case ActuatorControllerState::Active:
-      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (code kept but unreachable).
-      if (false) {
+      // Stay in Active: no transitions on Abort, AbortDone, or NoConnAbort (unless config allows).
+      if (ENABLE_ALL_STATE_TRANSITIONS) {
         if (kind == IncomingPacketKind::Abort || kind == IncomingPacketKind::AbortDone) {
           setState(ActuatorControllerState::AbortFinished);
         } else if (kind == IncomingPacketKind::NoConnAbort && !is_abort_controller) {
@@ -942,31 +932,12 @@ void setup() {
   FirmwareHash::print();
   Serial.println("Actuator Hotfire starting...");
 
-#if TEMP_HARDCODE_BOARD_ID
-  board_id = (uint8_t)TEMP_HARDCODE_BOARD_ID;
-  staticIP = IPAddress(192, 168, 2, (uint8_t)TEMP_HARDCODE_BOARD_ID);
-  Serial.print("Board ID and IP (temp hardcoded): ");
+  board_id = (uint8_t)BOARD_ID;
+  staticIP = IPAddress(192, 168, 2, (uint8_t)BOARD_ID);
+  Serial.print("Board ID and IP: ");
   Serial.print(static_cast<unsigned>(board_id));
   Serial.print(" / 192.168.2.");
   Serial.println(static_cast<unsigned>(board_id));
-#else
-  if (SPIFFS.begin(false)) {
-    File f = SPIFFS.open(SPIFFS_BOARD_VALUE_PATH, "r");
-    if (f && f.available() >= 1) {
-      uint8_t b;
-      if (f.read(&b, 1) == 1) {
-        board_id = b;
-        staticIP = IPAddress(192, 168, 2, b);
-        Serial.print("Board ID and IP from SPIFFS: ");
-        Serial.print(static_cast<unsigned>(board_id));
-        Serial.print(" / 192.168.2.");
-        Serial.println(static_cast<unsigned>(b));
-      }
-    }
-    if (f) f.close();
-    SPIFFS.end();
-  }
-#endif
 
   initializeActuators();
   initializeCurrentSensePins();

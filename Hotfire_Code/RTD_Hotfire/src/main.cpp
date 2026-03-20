@@ -10,7 +10,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <SPIFFS.h>
+
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <DAQv2-Comms.h>
@@ -28,6 +28,7 @@
 #include "connector_adc_map.h"
 #include "adc_mappings.h"
 #include "SensorHotfireCore.h"
+#include "SensorSelfTest.h"
 
 using namespace sense_board_pins;
 
@@ -222,8 +223,51 @@ static void send_chunks_to_cb(void*, IPAddress dest_ip, int dest_port,
                      abort_controller_ip, abort_controller_port);
 }
 
+static void run_self_test_cb(void*,
+    const SensorHotfire::StoredSensorConfig& cfg,
+    std::vector<Diablo::SelfTestResult>& results_out) {
+
+  // 1. ADC self-test (TDAC internal) for both ADCs
+  auto adc1_result = SensorSelfTest::run_adc_self_test(
+      ads126x, Pins.ADC_DRDY_1,
+      ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
+  results_out.push_back(Diablo::SelfTestResult{
+      0u, static_cast<uint8_t>(adc1_result.passed ? 1 : 0)});
+
+  auto adc2_result = SensorSelfTest::run_adc_self_test(
+      ads126x_2, Pins.ADC_DRDY_2,
+      ADS126X_REF_NEG_VSS, ADS126X_REF_POS_INT);
+  results_out.push_back(Diablo::SelfTestResult{
+      100u, static_cast<uint8_t>(adc2_result.passed ? 1 : 0)});
+
+  // 2. Sensor bias continuity test
+  SensorSelfTest::sensor_bias_enable(ads126x);
+  SensorSelfTest::sensor_bias_enable(ads126x_2);
+
+  for (uint8_t i = 0; i < cfg.num_sensors; i++) {
+    uint8_t id = cfg.sensor_ids[i];
+    int ch1 = getAdcChannel(id, 1);
+    int ch2 = getAdcChannel(id, 2);
+    if (ch1 < 0 || ch2 < 0) continue;
+
+    ADS126X& adc = adc_for_connector(id);
+    int drdy_pin = drdy_for_connector(id);
+
+    auto bias = SensorSelfTest::read_sensor_bias(
+        adc, drdy_pin,
+        static_cast<uint8_t>(ch1), static_cast<uint8_t>(ch2));
+    uint8_t pass = (bias.result == SensorSelfTest::BiasResult::CONNECTED) ? 1u : 0u;
+    results_out.push_back(Diablo::SelfTestResult{id, pass});
+  }
+
+  SensorSelfTest::sensor_bias_disable(ads126x);
+  SensorSelfTest::sensor_bias_disable(ads126x_2);
+}
+
 void setup() {
-  memset(&coreState, 0, sizeof(coreState));
+  // Do NOT memset coreState -- it contains IPAddress (has vtable via Printable)
+  // and EthernetUDP. memset zeroes vtable pointers, causing LoadProhibited
+  // crashes on virtual calls like Serial.print(IPAddress).
   coreState.gateway = IPAddress(0, 0, 0, 0);
   coreState.subnet = IPAddress(255, 255, 255, 0);
   coreState.dns = IPAddress(192, 168, 2, 1);
@@ -233,6 +277,7 @@ void setup() {
   coreConfig.init_adc = init_adc_cb;
   coreConfig.collect_chunk = collect_chunk_cb;
   coreConfig.send_chunks_to = send_chunks_to_cb;
+  coreConfig.run_self_test = run_self_test_cb;
   coreConfig.on_reference_voltage_config = on_reference_voltage_cb;
   coreConfig.user_data = nullptr;
 
