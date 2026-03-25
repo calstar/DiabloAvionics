@@ -50,7 +50,7 @@ void sendReplyTo(IPAddress primaryIP) {
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
 
-  size_t n = Diablo::create_sensor_data_packet(chunks, numSensors, replyBuffer, sizeof(replyBuffer));
+  size_t n = Diablo::create_sensor_data_packet(chunks, numSensors, millis(), replyBuffer, sizeof(replyBuffer));
   if (n == 0)
     return;
 

@@ -107,7 +107,7 @@ void sendSensorPacket() {
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
 
-  size_t n = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, packetBuffer, sizeof(packetBuffer));
+  size_t n = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, millis(), packetBuffer, sizeof(packetBuffer));
   if (n == 0) {
     Serial.println("SENT: (create_sensor_data_packet failed)");
     return;

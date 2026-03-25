@@ -1,4 +1,5 @@
 #include <DAQv2-Comms.h>
+#include <cstring>
 #include <Ethernet.h>
 #include <EthernetUdp.h>
 #include <SPI.h>
@@ -135,8 +136,7 @@ void sendExampleMessage() {
 bool sendHeartbeatPacket() {
   // Prepare heartbeat packet data
   Diablo::BoardHeartbeatPacket heartbeatData;
-  heartbeatData.board_type =
-      Diablo::BoardType::PRESSURE_TRANSDUCER;             // Change as needed
+  memset(heartbeatData.firmware_hash, 0, sizeof(heartbeatData.firmware_hash));
   heartbeatData.board_id = 1;                             // Change as needed
   heartbeatData.engine_state = Diablo::EngineState::SAFE; // Change as needed
   heartbeatData.board_state = Diablo::BoardState::ACTIVE; // Change as needed
@@ -144,7 +144,7 @@ bool sendHeartbeatPacket() {
   // Create the encoded packet
   uint8_t packetBuffer[MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_board_heartbeat_packet(
-      heartbeatData, packetBuffer, sizeof(packetBuffer));
+      heartbeatData, millis(), packetBuffer, sizeof(packetBuffer));
 
   if (packetSize == 0) {
     Serial.println("Error: Failed to create heartbeat packet");
@@ -158,9 +158,7 @@ bool sendHeartbeatPacket() {
 
   Serial.print("Sent heartbeat packet (UDP) with length ");
   Serial.print(packetSize);
-  Serial.print(" bytes - Board Type: ");
-  Serial.print(static_cast<int>(heartbeatData.board_type));
-  Serial.print(", Board ID: ");
+  Serial.print(" bytes - Board ID: ");
   Serial.print(heartbeatData.board_id);
   Serial.print(", Engine State: ");
   Serial.print(static_cast<int>(heartbeatData.engine_state));

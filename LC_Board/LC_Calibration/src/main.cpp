@@ -178,7 +178,7 @@ void loop()
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
 
-  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_LC_SENSORS, packetBuffer, sizeof(packetBuffer));
+  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_LC_SENSORS, millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize > 0) {
     udp.beginPacket(receiverIP, receiverPort);
     udp.write(packetBuffer, packetSize);

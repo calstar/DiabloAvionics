@@ -390,8 +390,8 @@ def find_pio_command() -> str:
 def compile_firmware(project_dir: Path, env_name: str, board_id: Optional[int] = None) -> Path:
     """Compile a PlatformIO project and return firmware.bin path.
 
-    If board_id is provided, append a TEMP_HARDCODE_BOARD_ID build flag so Hotfire
-    firmware uses that ID instead of SPIFFS/default. This is done via the
+    If board_id is provided, append a BOARD_ID build flag so Hotfire
+    firmware uses that ID instead of the default. This is done via the
     PLATFORMIO_BUILD_FLAGS environment variable so it doesn't require changes
     to platformio.ini.
     """
@@ -402,7 +402,7 @@ def compile_firmware(project_dir: Path, env_name: str, board_id: Optional[int] =
         except (TypeError, ValueError):
             bid = None
         if bid is not None and 0 <= bid <= 254:
-            extra_flag = f"-DTEMP_HARDCODE_BOARD_ID={bid}"
+            extra_flag = f"-DBOARD_ID={bid}"
             existing = env.get("PLATFORMIO_BUILD_FLAGS", "").strip()
             env["PLATFORMIO_BUILD_FLAGS"] = f"{existing} {extra_flag}".strip() if existing else extra_flag
     pio_cmd = find_pio_command()
@@ -1039,8 +1039,8 @@ class SenseTestingGUIWindow(QtWidgets.QMainWindow):
         self.ota_board_id_spin.setRange(0, 254)
         self.ota_board_id_spin.setValue(0)
         self.ota_board_id_spin.setToolTip(
-            "Board ID to compile into firmware via TEMP_HARDCODE_BOARD_ID.\n"
-            "0 = use board's SPIFFS/default ID (no override)."
+            "Board ID to compile into firmware via BOARD_ID.\n"
+            "0 = use default ID from platformio.ini (no override)."
         )
         ota_board_id_row.addWidget(self.ota_board_id_spin)
         ota_layout.addLayout(ota_board_id_row)

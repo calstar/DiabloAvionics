@@ -227,7 +227,7 @@ void test_sensor_process_sensor_config_packet() {
     std::vector<uint8_t> sensor_ids = {1, 2, 3};
     uint8_t buf[512];
     size_t n = Diablo::create_sensor_config_packet(
-        sensor_ids, 0, false, 0, 1, buf, sizeof(buf));
+        sensor_ids, 0, false, 0, 1, 9001u, buf, sizeof(buf));
     TEST_ASSERT_GREATER_THAN(0, n);
 
     SensorSM::StoredConfig cfg{};
@@ -246,7 +246,7 @@ void test_sensor_process_sensor_config_with_abort() {
     uint32_t controller_ip = 0xC0A80232;
     uint8_t buf[512];
     size_t n = Diablo::create_sensor_config_packet(
-        sensor_ids, 1, true, controller_ip, 1, buf, sizeof(buf));
+        sensor_ids, 1, true, controller_ip, 1, 9002u, buf, sizeof(buf));
     TEST_ASSERT_GREATER_THAN(0, n);
 
     SensorSM::StoredConfig cfg{};
@@ -305,7 +305,7 @@ void test_sensor_heartbeat_state_mapping_table() {
         hb.board_state = got;
 
         uint8_t buf[512];
-        size_t n = Diablo::create_board_heartbeat_packet(hb, buf, sizeof(buf));
+        size_t n = Diablo::create_board_heartbeat_packet(hb, 9003u, buf, sizeof(buf));
         TEST_ASSERT_GREATER_THAN(0, n);
 
         Diablo::PacketHeader hdr_out;

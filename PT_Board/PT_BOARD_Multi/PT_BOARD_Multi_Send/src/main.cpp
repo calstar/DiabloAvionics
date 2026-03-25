@@ -155,7 +155,7 @@ void loop() {
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
 
-  size_t n = Diablo::create_sensor_data_packet(chunks, NUM_PTS, packetBuffer, sizeof(packetBuffer));
+  size_t n = Diablo::create_sensor_data_packet(chunks, NUM_PTS, millis(), packetBuffer, sizeof(packetBuffer));
   if (n == 0)
     return;
 

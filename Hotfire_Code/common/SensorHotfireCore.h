@@ -2,7 +2,7 @@
  * Shared sensor hotfire state machine core — PT / TC / LC boards
  *
  * Single implementation of: UDP rx, packet processing, 3-state machine,
- * state LED, board heartbeat, SPIFFS board ID, Ethernet init.
+ * state LED, board heartbeat, Ethernet init.
  * Board-specific: ADC init, collect_chunk(), send_chunks_to() via callbacks.
  *
  * Include after: Arduino.h, Ethernet, DAQv2-Comms, main.h, sense_board_pins.h
@@ -272,7 +272,7 @@ inline void sendBoardHeartbeat(CoreState& s, const Config& cfg,
   hb.board_state = board_state;
 
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
-  size_t n = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
+  size_t n = Diablo::create_board_heartbeat_packet(hb, millis(), packetBuffer, sizeof(packetBuffer));
   if (n == 0) return;
   Serial.print("Sent: heartbeat to ");
   Serial.print(dest_ip);
@@ -444,7 +444,7 @@ inline void loop(CoreState& s, const Config& cfg) {
 
       uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
       size_t packetSize =
-          Diablo::create_self_test_packet(adc_good, results, packetBuffer, sizeof(packetBuffer));
+          Diablo::create_self_test_packet(adc_good, results, millis(), packetBuffer, sizeof(packetBuffer));
       if (packetSize > 0) {
         s.udp.beginPacket(s.serverIP, s.serverPort);
         s.udp.write(packetBuffer, packetSize);

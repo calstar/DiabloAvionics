@@ -16,6 +16,11 @@
 #define PT_ABORT_THRESHOLD_TIMEOUT_MS    10000   // PT Abort: max wait for PTs below threshold before applying abort
 #define NO_PT_ABORT_VENT_TO_ABORT_MS     10000   // No PT Abort: wait between vent and abort
 #define STANDALONE_ABORT_VENT_TO_ABORT_MS 10000  // Standalone Abort: wait between vent and abort (local only)
+#define STANDALONE_ABORT_PT_LOSS_MS      3000   // ConnectionLossDetected: no PT data from config for this long -> StandaloneAbort
+
+// Board identity (SPIFFS)
+#define SPIFFS_BOARD_VALUE_PATH         "/value.bin"
+#define BOARD_ID_DEFAULT                1
 
 // Actuator current-sense streaming
 #define ADC_READ_INTERVAL_MS             100    // Interval between sensor data packets

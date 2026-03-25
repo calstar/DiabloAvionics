@@ -106,7 +106,7 @@ static void send_chunks_to_impl(IPAddress dest_ip, int dest_port,
   uint8_t packetBuffer[SENSOR_HOTFIRE_MAX_PACKET_SIZE];
   const uint8_t num_sensors = dataChunks[0].num_sensors;
   size_t packetSize = Diablo::create_sensor_data_packet(
-      dataChunks, num_sensors, packetBuffer, sizeof(packetBuffer));
+      dataChunks, num_sensors, millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
   coreState.udp.beginPacket(dest_ip, dest_port);
   coreState.udp.write(packetBuffer, packetSize);

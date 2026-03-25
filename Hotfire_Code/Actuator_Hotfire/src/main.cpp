@@ -226,7 +226,7 @@ static void sendBoardHeartbeat() {
   hb.board_state = getBoardStateForHeartbeat();
 
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t len = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
+  size_t len = Diablo::create_board_heartbeat_packet(hb, millis(), packetBuffer, sizeof(packetBuffer));
   if (len == 0) return;
 
   Serial.print("Sent: heartbeat to ");
@@ -303,7 +303,7 @@ static void applyVentToAllActuators() {
     } else {
       std::vector<Diablo::ActuatorCommand> cmds;
       cmds.push_back({ loc.actuator_id, loc.vent_state ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0) });
-      size_t len = Diablo::create_actuator_command_packet(cmds, packetBuffer, sizeof(packetBuffer));
+      size_t len = Diablo::create_actuator_command_packet(cmds, millis(), packetBuffer, sizeof(packetBuffer));
       if (len > 0) {
         udp.beginPacket(uint32ToIPAddress(loc.ip_address), udpListenPort);
         udp.write(packetBuffer, len);
@@ -330,7 +330,7 @@ static void applyAbortToAllActuators() {
     } else {
       std::vector<Diablo::ActuatorCommand> cmds;
       cmds.push_back({ loc.actuator_id, loc.abort_state ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0) });
-      size_t len = Diablo::create_actuator_command_packet(cmds, packetBuffer, sizeof(packetBuffer));
+      size_t len = Diablo::create_actuator_command_packet(cmds, millis(), packetBuffer, sizeof(packetBuffer));
       if (len > 0) {
         udp.beginPacket(uint32ToIPAddress(loc.ip_address), udpListenPort);
         udp.write(packetBuffer, len);
@@ -663,7 +663,7 @@ static void readCurrentSensePinsAndSend() {
   uint8_t packetBuffer[MAX_PACKET_SIZE];
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
-  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, packetBuffer, sizeof(packetBuffer));
+  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
 
   udp.beginPacket(serverIP, serverPort);

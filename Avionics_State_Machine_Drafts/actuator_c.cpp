@@ -145,12 +145,13 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
     case ActuatorControllerState::Active:
       return Diablo::BoardState::ACTIVE;
     case ActuatorControllerState::StandardAbort:
+      return Diablo::BoardState::PT_ABORT;
     case ActuatorControllerState::NoConnectionAbort:
-      return Diablo::BoardState::ABORT;
+      return Diablo::BoardState::NO_CONNECTION_ABORT;
     case ActuatorControllerState::AbortFinished:
-      return Diablo::BoardState::ABORT_DONE;
+      return Diablo::BoardState::ABORT_FINISHED;
     case ActuatorControllerState::ConnectionLossDetected:
-      return Diablo::BoardState::ACTIVE;  // Still report as active while waiting
+      return Diablo::BoardState::CONNECTION_LOSS_DETECTED;
     default:
       return Diablo::BoardState::SETUP;
   }
@@ -161,13 +162,13 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
 //-----------------------------------------------------------------------------
 static void sendBoardHeartbeat() {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::ACTUATOR;
+  memset(hb.firmware_hash, 0, sizeof(hb.firmware_hash));
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = getBoardStateForHeartbeat();
 
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t len = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
+  size_t len = Diablo::create_board_heartbeat_packet(hb, millis(), packetBuffer, sizeof(packetBuffer));
   if (len == 0) return;
 
   udp.beginPacket(serverIP, serverPort);
@@ -272,7 +273,7 @@ static void readCurrentSensePinsAndSend() {
   uint8_t packetBuffer[MAX_PACKET_SIZE];
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
-  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, packetBuffer, sizeof(packetBuffer));
+  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
 
   udp.beginPacket(serverIP, serverPort);

@@ -139,6 +139,7 @@ void sendSensorDataPacket() {
   size_t packetSize = Diablo::create_sensor_data_packet(
     dataChunks,
     NUM_SENSORS,
+    millis(),
     packetBuffer,
     sizeof(packetBuffer)
   );

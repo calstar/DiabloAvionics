@@ -21,18 +21,9 @@
 
 // Board identity
 #ifndef BOARD_ID
-#define BOARD_ID 42
+#define BOARD_ID 61
 #endif
 
-// Temporary: set to non-zero (1-254) to hardcode board ID and skip SPIFFS.
-// Set to 0 to use SPIFFS (normal). Easy to undo: set back to 0.
-//
-// This value can be overridden from PlatformIO via a build flag, e.g.:
-//   build_flags = -DTEMP_HARDCODE_BOARD_ID=7
-// If no such build flag is provided, the default below is used.
-#ifndef TEMP_HARDCODE_BOARD_ID
-#define TEMP_HARDCODE_BOARD_ID      51
-#endif
 
 // Safety Configuration
 #ifndef ENABLE_ALL_STATE_TRANSITIONS

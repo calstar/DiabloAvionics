@@ -18,6 +18,9 @@
 #include <vector>
 #include <esp_mac.h>
 
+#ifndef BOARD_ID
+#define BOARD_ID 61
+#endif
 #include "hotfire_config.h"
 #include "sense_config.h"
 #include "firmware_hash.h"
@@ -179,7 +182,7 @@ static void runSelfTest() {
   results.push_back(Diablo::SelfTestResult{SENSOR_ID_ENC2, static_cast<uint8_t>(enc2_ok ? 1 : 0)});
 
   uint8_t buf[ENCODER_PACKET_BUF_SIZE];
-  size_t n = Diablo::create_self_test_packet(adc_good, results, buf, sizeof(buf));
+  size_t n = Diablo::create_self_test_packet(adc_good, results, millis(), buf, sizeof(buf));
   if (n > 0) {
     udp.beginPacket(serverIP, serverPort);
     udp.write(buf, n);
@@ -205,7 +208,7 @@ static void sendDataChunks() {
 
   uint8_t buf[ENCODER_PACKET_BUF_SIZE];
   size_t n = Diablo::create_sensor_data_packet(
-      dataChunks, NUM_SENSORS, buf, sizeof(buf));
+      dataChunks, NUM_SENSORS, millis(), buf, sizeof(buf));
   if (n == 0) {
     dataChunks.clear();
     return;
@@ -235,7 +238,7 @@ static void sendHeartbeat() {
   hb.board_state = currentBoardState();
 
   uint8_t buf[ENCODER_PACKET_BUF_SIZE];
-  size_t n = Diablo::create_board_heartbeat_packet(hb, buf, sizeof(buf));
+  size_t n = Diablo::create_board_heartbeat_packet(hb, millis(), buf, sizeof(buf));
   if (n == 0) return;
 
   udp.beginPacket(serverIP, serverPort);

@@ -238,7 +238,7 @@ void test_actuator_heartbeat_state_mapping_table() {
         hb.board_state = got;
 
         uint8_t buf[512];
-        size_t n = Diablo::create_board_heartbeat_packet(hb, buf, sizeof(buf));
+        size_t n = Diablo::create_board_heartbeat_packet(hb, 12345u, buf, sizeof(buf));
         TEST_ASSERT_GREATER_THAN(0, n);
 
         Diablo::PacketHeader hdr_out;
@@ -256,7 +256,7 @@ void test_actuator_heartbeat_board_id_preserved() {
     hb.board_state = getBoardStateForHeartbeat(ActuatorControllerState::PTAbort);
 
     uint8_t buf[512];
-    size_t n = Diablo::create_board_heartbeat_packet(hb, buf, sizeof(buf));
+    size_t n = Diablo::create_board_heartbeat_packet(hb, 12346u, buf, sizeof(buf));
 
     Diablo::PacketHeader hdr_out;
     Diablo::BoardHeartbeatPacket hb_out;

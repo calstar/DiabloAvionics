@@ -18,6 +18,7 @@
 #include <vector>
 #include "actuator_board_pins.h"
 #include "actuator_config.h"
+#include "firmware_hash.h"
 
 using namespace actuator_board_pins;
 
@@ -154,16 +155,20 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
       return Diablo::BoardState::SETUP;
     case ActuatorControllerState::Active:
       return Diablo::BoardState::ACTIVE;
-    case ActuatorControllerState::StandardAbort:
-    case ActuatorControllerState::NoConnectionAbort:
-    case ActuatorControllerState::PTAbort:
-    case ActuatorControllerState::NoPTAbort:
-    case ActuatorControllerState::StandaloneAbort:
-      return Diablo::BoardState::ABORT;
-    case ActuatorControllerState::AbortFinished:
-      return Diablo::BoardState::ABORT_DONE;
     case ActuatorControllerState::ConnectionLossDetected:
-      return Diablo::BoardState::ACTIVE;
+      return Diablo::BoardState::CONNECTION_LOSS_DETECTED;
+    case ActuatorControllerState::NoConnectionAbort:
+      return Diablo::BoardState::NO_CONNECTION_ABORT;
+    case ActuatorControllerState::PTAbort:
+      return Diablo::BoardState::PT_ABORT;
+    case ActuatorControllerState::NoPTAbort:
+      return Diablo::BoardState::NO_PT_ABORT;
+    case ActuatorControllerState::AbortFinished:
+      return Diablo::BoardState::ABORT_FINISHED;
+    case ActuatorControllerState::StandardAbort:
+      return Diablo::BoardState::PT_ABORT;
+    case ActuatorControllerState::StandaloneAbort:
+      return Diablo::BoardState::STANDALONE_ABORT;
     default:
       return Diablo::BoardState::SETUP;
   }
@@ -171,13 +176,13 @@ static Diablo::BoardState getBoardStateForHeartbeat() {
 
 static void sendBoardHeartbeat() {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::ACTUATOR;
+  memcpy(hb.firmware_hash, FirmwareHash::get(), 32);
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = getBoardStateForHeartbeat();
 
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t len = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
+  size_t len = Diablo::create_board_heartbeat_packet(hb, millis(), packetBuffer, sizeof(packetBuffer));
   if (len == 0) return;
 
   udp.beginPacket(serverIP, serverPort);
@@ -244,7 +249,10 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
       uint8_t is_controller = 0;
       std::vector<Diablo::AbortActuatorLocation> act_locs;
       std::vector<Diablo::AbortPTLocation> pt_locs;
-      if (Diablo::parse_actuator_config_packet(buffer, len, dummy, is_controller, act_locs, pt_locs)) {
+      uint8_t enable_serial_printing = 0;
+      if (Diablo::parse_actuator_config_packet(buffer, len, dummy, is_controller, act_locs, pt_locs,
+                                                enable_serial_printing)) {
+        (void)enable_serial_printing;
         is_abort_controller = (is_controller != 0);
         abort_actuator_locations = act_locs;
         abort_pt_locations = pt_locs;
@@ -317,7 +325,7 @@ static void readCurrentSensePinsAndSend() {
   uint8_t packetBuffer[MAX_PACKET_SIZE];
   std::vector<Diablo::SensorDataChunkCollection> chunks;
   chunks.push_back(chunk);
-  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, packetBuffer, sizeof(packetBuffer));
+  size_t packetSize = Diablo::create_sensor_data_packet(chunks, NUM_SENSORS, millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
 
   udp.beginPacket(serverIP, serverPort);
@@ -339,11 +347,24 @@ static void streamSensorDataIfDue() {
 }
 
 //-----------------------------------------------------------------------------
+// NO_CONNECTION_ABORT: header-only (not in DAQv2-Comms serializers)
+//-----------------------------------------------------------------------------
+static size_t create_no_connection_abort_packet(uint8_t *buffer, size_t buffer_size) {
+  if (buffer_size < sizeof(Diablo::PacketHeader)) return 0;
+  Diablo::PacketHeader header;
+  header.packet_type = Diablo::PacketType::NO_CONNECTION_ABORT;
+  header.version = DIABLO_COMMS_VERSION;
+  header.timestamp = millis();
+  memcpy(buffer, &header, sizeof(header));
+  return sizeof(header);
+}
+
+//-----------------------------------------------------------------------------
 // Send NO_CONNECTION_ABORT to each PT in config
 //-----------------------------------------------------------------------------
 static void sendNoConnectionAbortToAllPTs() {
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t len = Diablo::create_no_connection_abort_packet(packetBuffer, sizeof(packetBuffer));
+  size_t len = create_no_connection_abort_packet(packetBuffer, sizeof(packetBuffer));
   if (len == 0) return;
 
   for (const auto &loc : abort_pt_locations) {

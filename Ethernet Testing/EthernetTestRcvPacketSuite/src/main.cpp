@@ -179,34 +179,7 @@ void printBoardHeartbeat(const Diablo::PacketHeader &header,
   printPacketHeader(header);
 
   Serial.println("--- Packet Data ---");
-  Serial.print("Board Type: ");
-  Serial.print(static_cast<int>(data.board_type));
-  Serial.print(" (");
-  switch (data.board_type) {
-  case Diablo::BoardType::UNKNOWN:
-    Serial.print("UNKNOWN");
-    break;
-  case Diablo::BoardType::PRESSURE_TRANSDUCER:
-    Serial.print("PRESSURE_TRANSDUCER");
-    break;
-  case Diablo::BoardType::LOAD_CELL:
-    Serial.print("LOAD_CELL");
-    break;
-  case Diablo::BoardType::RTD:
-    Serial.print("RTD");
-    break;
-  case Diablo::BoardType::THERMOCOUPLE:
-    Serial.print("THERMOCOUPLE");
-    break;
-  case Diablo::BoardType::ACTUATOR:
-    Serial.print("ACTUATOR");
-    break;
-  default:
-    Serial.print("UNKNOWN");
-    break;
-  }
-  Serial.println(")");
-
+  Serial.println("(Board role is implied by board_id / deployment; no board_type field.)");
   Serial.print("Board ID: ");
   Serial.println(data.board_id);
 
@@ -245,11 +218,29 @@ void printBoardHeartbeat(const Diablo::PacketHeader &header,
   case Diablo::BoardState::ACTIVE:
     Serial.print("ACTIVE");
     break;
-  case Diablo::BoardState::ABORT:
-    Serial.print("ABORT");
+  case Diablo::BoardState::CONNECTION_LOSS_DETECTED:
+    Serial.print("CONNECTION_LOSS_DETECTED");
     break;
-  case Diablo::BoardState::ABORT_DONE:
-    Serial.print("ABORT_DONE");
+  case Diablo::BoardState::NO_CONNECTION_ABORT:
+    Serial.print("NO_CONNECTION_ABORT");
+    break;
+  case Diablo::BoardState::NO_CONN_ABORT_FOLLOWER:
+    Serial.print("NO_CONN_ABORT_FOLLOWER");
+    break;
+  case Diablo::BoardState::PT_ABORT:
+    Serial.print("PT_ABORT");
+    break;
+  case Diablo::BoardState::NO_PT_ABORT:
+    Serial.print("NO_PT_ABORT");
+    break;
+  case Diablo::BoardState::ABORT_FINISHED:
+    Serial.print("ABORT_FINISHED");
+    break;
+  case Diablo::BoardState::STANDALONE_ABORT:
+    Serial.print("STANDALONE_ABORT");
+    break;
+  case Diablo::BoardState::SELF_TEST:
+    Serial.print("SELF_TEST");
     break;
   default:
     Serial.print("UNKNOWN");

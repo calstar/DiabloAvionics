@@ -155,8 +155,7 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
     case Diablo::PacketType::CLEAR_ABORT:
       return IncomingPacketKind::ClearAbort;
     case Diablo::PacketType::NO_CONNECTION_ABORT: {
-      Diablo::PacketHeader dummy;
-      if (Diablo::parse_no_connection_abort_packet(buffer, len, dummy))
+      if (len >= sizeof(Diablo::PacketHeader))
         return IncomingPacketKind::NoConnAbort;
       return IncomingPacketKind::None;
     }
@@ -170,13 +169,13 @@ static IncomingPacketKind processIncomingPacket(const uint8_t *buffer, size_t le
 //-----------------------------------------------------------------------------
 static void sendBoardHeartbeat(Diablo::BoardState board_state, IPAddress dest_ip, int dest_port) {
   Diablo::BoardHeartbeatPacket hb;
-  hb.board_type = Diablo::BoardType::THERMOCOUPLE;
+  memset(hb.firmware_hash, 0, sizeof(hb.firmware_hash));
   hb.board_id = board_id;
   hb.engine_state = Diablo::EngineState::SAFE;
   hb.board_state = board_state;
 
   uint8_t packetBuffer[MAX_PACKET_SIZE];
-  size_t n = Diablo::create_board_heartbeat_packet(hb, packetBuffer, sizeof(packetBuffer));
+  size_t n = Diablo::create_board_heartbeat_packet(hb, millis(), packetBuffer, sizeof(packetBuffer));
   if (n == 0) return;
   udp.beginPacket(dest_ip, dest_port);
   udp.write(packetBuffer, n);
@@ -190,7 +189,7 @@ static void sendSensorDataPacketTo(IPAddress dest_ip, int dest_port) {
   if (dataChunks.empty()) return;
   uint8_t packetBuffer[MAX_PACKET_SIZE];
   size_t packetSize = Diablo::create_sensor_data_packet(
-    dataChunks, static_cast<uint8_t>(NUM_PTS), packetBuffer, sizeof(packetBuffer));
+    dataChunks, static_cast<uint8_t>(NUM_PTS), millis(), packetBuffer, sizeof(packetBuffer));
   if (packetSize == 0) return;
   udp.beginPacket(dest_ip, dest_port);
   udp.write(packetBuffer, packetSize);
@@ -374,14 +373,14 @@ void loop() {
         break;
       case PTHotfireState::StandaloneAbort:
         if (!stored_config.valid || stored_config.actuator_controller_ip == 0)
-          sendBoardHeartbeat(Diablo::BoardState::ABORT, serverIP, serverPort);
+          sendBoardHeartbeat(Diablo::BoardState::STANDALONE_ABORT, serverIP, serverPort);
         else {
           IPAddress actuatorIP(
             (stored_config.actuator_controller_ip >> 24) & 0xFF,
             (stored_config.actuator_controller_ip >> 16) & 0xFF,
             (stored_config.actuator_controller_ip >> 8) & 0xFF,
             stored_config.actuator_controller_ip & 0xFF);
-          sendBoardHeartbeat(Diablo::BoardState::ABORT, actuatorIP, serverPortDefault);
+          sendBoardHeartbeat(Diablo::BoardState::STANDALONE_ABORT, actuatorIP, serverPortDefault);
         }
         break;
     }
