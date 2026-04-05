@@ -27,8 +27,9 @@ After a PlatformIO build, each board's firmware binary is at:
 | LC       | `LC_Hotfire/.pio/build/adafruit_feather_esp32s3/firmware.bin`         |
 | RTD      | `RTD_Hotfire/.pio/build/adafruit_feather_esp32s3/firmware.bin`        |
 | Actuator | `Actuator_Hotfire/.pio/build/adafruit_feather_esp32s3/firmware.bin`   |
+| Stacklight | `Stacklight Driver/.pio/build/adafruit_feather_esp32s3/firmware.bin` (repo root) |
 
-All paths are relative to `Hotfire_Code/`.
+Paths through Actuator are relative to `Hotfire_Code/`. Stacklight is relative to the `DiabloAvionics` repo root (sibling of `Hotfire_Code/`).
 
 ## Server-Side Hash Computation (Python)
 
