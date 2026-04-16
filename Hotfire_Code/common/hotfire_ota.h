@@ -25,10 +25,20 @@
 #define HOTFIRE_OTA_TIMEOUT_MS  10000
 #endif
 
-// Ethernet 2.x: EthernetServer is concrete; the listen port is set in the
-// constructor and begin() takes no arguments. Keep a name used across hotfire
-// firmware without a bogus override (older ESP32/Ethernet forks differed).
-using OTAEthernetServer = EthernetServer;
+// Some Arduino-ESP32 cores make Server use pure virtual begin(uint16_t); others
+// use begin(). Official Ethernet 2.x EthernetServer only implements void begin(),
+// so EthernetServer can be abstract on CI. Implement begin(uint16_t) without
+// 'override' so it matches newer Server.h on CI; omitting 'override' avoids an
+// error on older cores whose Server has no begin(uint16_t).
+class OTAEthernetServer : public EthernetServer {
+public:
+  explicit OTAEthernetServer(uint16_t port) : EthernetServer(port) {}
+  void begin(uint16_t port = 0) {
+    (void)port;
+    EthernetServer::begin();
+  }
+  using EthernetServer::begin;
+};
 
 // Blocking OTA handler. Call only after otaServer.available() returns a client.
 // On success: sends "OK", closes the client, and reboots.
