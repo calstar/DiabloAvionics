@@ -9,6 +9,9 @@
 #define BOARD_HEARTBEAT_INTERVAL_MS  1000   // Send board heartbeat once per second
 #define LOOP_DELAY_MS                 10    // Delay at end of each loop()
 
+// USB serial: brief pause so the host monitor can attach before boot logs (ESP32 CDC)
+#define SERIAL_MONITOR_READY_DELAY_MS  500
+
 // Ethernet init delays (milliseconds)
 #define ETHERNET_SPI_DELAY_MS        1000   // Delay after SPI.begin() for Ethernet
 #define ETHERNET_INIT_DELAY_MS       1000   // Delay after Ethernet.init()
@@ -21,7 +24,7 @@
 
 // Board identity
 #ifndef BOARD_ID
-#define BOARD_ID 61
+#define BOARD_ID 21
 #endif
 
 

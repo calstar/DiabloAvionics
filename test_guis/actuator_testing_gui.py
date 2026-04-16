@@ -9,7 +9,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 
-# ---------------------- Protocol constants (DAQv2 style) ----------------------
+# ---------------------- Protocol constants (DAQv2-Comms) ----------------------
 
 DIABLO_COMMS_VERSION = 0
 MAX_PACKET_SIZE = 512
@@ -20,32 +20,70 @@ class PacketType:
     SERVER_HEARTBEAT = 2
     SENSOR_DATA = 3
     ACTUATOR_COMMAND = 4
+    ACTUATOR_CONFIG = 6
 
 
-PACKET_HEADER_FORMAT = '<BBI'
+PACKET_HEADER_FORMAT = "<BBI"
 PACKET_HEADER_SIZE = 6
 
-SENSOR_DATA_PACKET_FORMAT = '<BB'
+BOARD_HEARTBEAT_BODY_FORMAT = "<32sBBB"  # firmware_hash[32], board_id, engine_state, board_state
+BOARD_HEARTBEAT_BODY_SIZE = 35
+
+SENSOR_DATA_PACKET_FORMAT = "<BB"
 SENSOR_DATA_PACKET_SIZE = 2
-SENSOR_DATA_CHUNK_FORMAT = '<I'
+SENSOR_DATA_CHUNK_FORMAT = "<I"
 SENSOR_DATA_CHUNK_SIZE = 4
-SENSOR_DATAPOINT_FORMAT = '<BI'
+SENSOR_DATAPOINT_FORMAT = "<BI"
 SENSOR_DATAPOINT_SIZE = 5
 
-ACTUATOR_COMMAND_PACKET_FORMAT = '<B'
+ACTUATOR_COMMAND_PACKET_FORMAT = "<B"
 ACTUATOR_COMMAND_PACKET_SIZE = 1
-ACTUATOR_COMMAND_FORMAT = '<BB'
+ACTUATOR_COMMAND_FORMAT = "<BB"
 ACTUATOR_COMMAND_SIZE = 2
 
 NUM_ACTUATORS = 10
 
-DEFAULT_ACTUATOR_IP = "192.168.2.202"  # Actuator_Testing board
+DEFAULT_ACTUATOR_IP = "192.168.2.11"
 ACTUATOR_COMMAND_PORT = 5005          # Board listens here for commands
 SENSOR_RECEIVE_PORT = 5006            # Board sends current-sense packets here
 
 WINDOW_SECONDS = 10.0
 UPDATE_INTERVAL_MS = 100
 MAX_POINTS = 50000
+
+HEARTBEAT_TIMEOUT_SEC = 2.5
+HEARTBEAT_RATE_WINDOW = 20
+SERVER_HEARTBEAT_INTERVAL_MS = 500
+
+# Match sense_testing_gui BoardState
+class BoardState:
+    SETUP = 1
+    ACTIVE = 2
+    CONNECTION_LOSS_DETECTED = 3
+    NO_CONNECTION_ABORT = 4
+    NO_CONN_ABORT_FOLLOWER = 5
+    PT_ABORT = 6
+    NO_PT_ABORT = 7
+    ABORT_FINISHED = 8
+    STANDALONE_ABORT = 9
+    SELF_TEST = 10
+
+
+def board_state_name(state: int) -> str:
+    names = {
+        BoardState.SETUP: "Setup",
+        BoardState.ACTIVE: "Active",
+        BoardState.CONNECTION_LOSS_DETECTED: "Conn Loss",
+        BoardState.NO_CONNECTION_ABORT: "No Conn Abort",
+        BoardState.NO_CONN_ABORT_FOLLOWER: "No Conn Follower",
+        BoardState.PT_ABORT: "PT Abort",
+        BoardState.NO_PT_ABORT: "No PT Abort",
+        BoardState.ABORT_FINISHED: "Abort Finished",
+        BoardState.STANDALONE_ABORT: "Standalone Abort",
+        BoardState.SELF_TEST: "Self Test",
+    }
+    return names.get(state, f"Unknown ({state})")
+
 
 SENSOR_COLORS = [
     (255, 80, 80),
@@ -72,6 +110,22 @@ def parse_packet_header(data: bytes) -> Optional[Tuple[int, int, int]]:
         return None
 
 
+def parse_board_heartbeat_packet(data: bytes) -> Optional[Tuple[tuple, bytes, int, int, int]]:
+    if len(data) < PACKET_HEADER_SIZE + BOARD_HEARTBEAT_BODY_SIZE:
+        return None
+    header = parse_packet_header(data)
+    if header is None or header[0] != PacketType.BOARD_HEARTBEAT:
+        return None
+    try:
+        body = struct.unpack(
+            BOARD_HEARTBEAT_BODY_FORMAT,
+            data[PACKET_HEADER_SIZE : PACKET_HEADER_SIZE + BOARD_HEARTBEAT_BODY_SIZE],
+        )
+    except struct.error:
+        return None
+    return (header, body[0], body[1], body[2], body[3])
+
+
 def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
     if len(data) < PACKET_HEADER_SIZE + SENSOR_DATA_PACKET_SIZE:
         return None
@@ -85,7 +139,7 @@ def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
     try:
         num_chunks, num_sensors = struct.unpack(
             SENSOR_DATA_PACKET_FORMAT,
-            data[offset:offset + SENSOR_DATA_PACKET_SIZE],
+            data[offset : offset + SENSOR_DATA_PACKET_SIZE],
         )
     except struct.error:
         return None
@@ -101,7 +155,7 @@ def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
         try:
             (chunk_ts,) = struct.unpack(
                 SENSOR_DATA_CHUNK_FORMAT,
-                data[offset:offset + SENSOR_DATA_CHUNK_SIZE],
+                data[offset : offset + SENSOR_DATA_CHUNK_SIZE],
             )
         except struct.error:
             return None
@@ -112,7 +166,7 @@ def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
             try:
                 sensor_id, sensor_data = struct.unpack(
                     SENSOR_DATAPOINT_FORMAT,
-                    data[offset:offset + SENSOR_DATAPOINT_SIZE],
+                    data[offset : offset + SENSOR_DATAPOINT_SIZE],
                 )
             except struct.error:
                 return None
@@ -127,6 +181,26 @@ def parse_sensor_data_packet(data: bytes) -> Optional[Tuple[dict, List[dict]]]:
         "timestamp": timestamp,
     }
     return header_dict, chunks
+
+
+def _make_header(packet_type: int) -> bytes:
+    ts = int(time.time() * 1000) & 0xFFFFFFFF
+    return struct.pack(PACKET_HEADER_FORMAT, packet_type, DIABLO_COMMS_VERSION, ts)
+
+
+def build_server_heartbeat_packet() -> bytes:
+    """Server heartbeat: header + 1 byte engine_state (0 = SAFE)."""
+    return _make_header(PacketType.SERVER_HEARTBEAT) + struct.pack("<B", 0)
+
+
+def build_minimal_actuator_config_packet() -> bytes:
+    """DAQv2-Comms ACTUATOR_CONFIG: not abort controller, no actuators/PTs, serial printing on."""
+    header = _make_header(PacketType.ACTUATOR_CONFIG)
+    # ActuatorConfigPacket: is_abort_controller, num_abort_actuators
+    # AbortPTSectionHeader: num_abort_pts
+    # enable_serial_printing
+    body = struct.pack("<BB", 0, 0) + struct.pack("<B", 0) + struct.pack("<B", 1)
+    return header + body
 
 
 def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
@@ -146,18 +220,15 @@ def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
     pkt = bytearray(total_size)
     offset = 0
 
-    # header
     packet_type = PacketType.ACTUATOR_COMMAND
     version = DIABLO_COMMS_VERSION
     timestamp = int(time.time() * 1000) & 0xFFFFFFFF
     struct.pack_into(PACKET_HEADER_FORMAT, pkt, offset, packet_type, version, timestamp)
     offset += PACKET_HEADER_SIZE
 
-    # body header
     struct.pack_into(ACTUATOR_COMMAND_PACKET_FORMAT, pkt, offset, len(commands))
     offset += ACTUATOR_COMMAND_PACKET_SIZE
 
-    # commands
     for actuator_id, state in commands:
         struct.pack_into(ACTUATOR_COMMAND_FORMAT, pkt, offset, actuator_id, state)
         offset += ACTUATOR_COMMAND_SIZE
@@ -169,28 +240,46 @@ def create_actuator_command_packet(commands: List[Tuple[int, int]]) -> bytes:
 
 class SensorReceiver(QtCore.QThread):
     sensor_data_received = QtCore.pyqtSignal(dict, list, str)
+    board_heartbeat_received = QtCore.pyqtSignal(float, int, int, int, str, bytes)
     status_update = QtCore.pyqtSignal(str)
 
-    def __init__(self, port: int, bind_address: str = "0.0.0.0"):
+    def __init__(
+        self,
+        port: int,
+        bind_address: str = "0.0.0.0",
+        sock: Optional[socket.socket] = None,
+    ):
         super().__init__()
         self.port = port
         self.bind_address = bind_address
+        self._external_sock = sock
+        self._owned_socket = sock is None
         self._stop = False
         self.sock: Optional[socket.socket] = None
 
     def stop(self):
         self._stop = True
+        if self._owned_socket and self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
 
     def run(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.settimeout(0.1)
-        try:
-            self.sock.bind((self.bind_address, self.port))
+        if self._external_sock is not None:
+            self.sock = self._external_sock
+            self.sock.settimeout(0.1)
             self.status_update.emit(f"Listening on {self.bind_address}:{self.port}")
-        except OSError as e:
-            self.status_update.emit(f"Error binding: {e}")
-            return
+        else:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.settimeout(0.1)
+            try:
+                self.sock.bind((self.bind_address, self.port))
+                self.status_update.emit(f"Listening on {self.bind_address}:{self.port}")
+            except OSError as e:
+                self.status_update.emit(f"Error binding: {e}")
+                return
 
         while not self._stop:
             try:
@@ -204,7 +293,24 @@ class SensorReceiver(QtCore.QThread):
 
             src_ip = addr[0]
             header = parse_packet_header(data)
-            if not header or header[0] != PacketType.SENSOR_DATA:
+            if not header:
+                continue
+
+            if header[0] == PacketType.BOARD_HEARTBEAT:
+                result = parse_board_heartbeat_packet(data)
+                if result:
+                    _h, firmware_hash, board_id, engine_state, board_state = result
+                    self.board_heartbeat_received.emit(
+                        time.time(),
+                        board_id,
+                        board_state,
+                        engine_state,
+                        src_ip,
+                        firmware_hash,
+                    )
+                continue
+
+            if header[0] != PacketType.SENSOR_DATA:
                 continue
 
             result = parse_sensor_data_packet(data)
@@ -213,11 +319,12 @@ class SensorReceiver(QtCore.QThread):
             header_dict, chunks = result
             self.sensor_data_received.emit(header_dict, chunks, src_ip)
 
-        if self.sock:
+        if self._owned_socket and self.sock:
             try:
                 self.sock.close()
             except Exception:
                 pass
+        self.sock = None
         self.status_update.emit("Stopped")
 
 
@@ -227,7 +334,7 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Actuator Testing – Current Sense + Control")
-        self.resize(1100, 700)
+        self.resize(1100, 750)
 
         self.device_ip = DEFAULT_ACTUATOR_IP
         self.device_port = ACTUATOR_COMMAND_PORT
@@ -240,12 +347,31 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
         }
         self.plot_enabled: Dict[int, bool] = {i: True for i in range(1, NUM_ACTUATORS + 1)}
 
+        self.heartbeat_timestamps: deque = deque(maxlen=HEARTBEAT_RATE_WINDOW)
+        self.last_heartbeat_time: Optional[float] = None
+        self.board_id: Optional[int] = None
+        self.board_state: Optional[int] = None
+        self.board_source_ip: Optional[str] = None
+        self.firmware_hash: Optional[bytes] = None
+
+        self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._send_sock.settimeout(0.5)
+        self._shared_sock: Optional[socket.socket] = None
+        try:
+            self._send_sock.bind(("", SENSOR_RECEIVE_PORT))
+            self._shared_sock = self._send_sock
+        except OSError:
+            self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self._server_heartbeat_timer = QtCore.QTimer(self)
+        self._server_heartbeat_timer.timeout.connect(self._send_server_heartbeat_once)
+
         self._build_ui()
 
-        self.command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-        self.receiver = SensorReceiver(SENSOR_RECEIVE_PORT)
+        self.receiver = SensorReceiver(SENSOR_RECEIVE_PORT, sock=self._shared_sock)
         self.receiver.sensor_data_received.connect(self.on_sensor_data)
+        self.receiver.board_heartbeat_received.connect(self._on_board_heartbeat)
         self.receiver.status_update.connect(self.status_label.setText)
         self.receiver.start()
 
@@ -267,6 +393,10 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
         net_row = QtWidgets.QHBoxLayout()
         net_row.addWidget(QtWidgets.QLabel("Actuator IP:"))
         self.ip_edit = QtWidgets.QLineEdit(self.device_ip)
+        self.ip_edit.setToolTip(
+            "Target for commands, server heartbeat, and actuator config. "
+            "Auto-filled from BOARD_HEARTBEAT source; last heartbeat wins if multiple boards."
+        )
         net_row.addWidget(self.ip_edit)
         net_row.addWidget(QtWidgets.QLabel("Cmd port:"))
         self.port_spin = QtWidgets.QSpinBox()
@@ -274,6 +404,36 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
         self.port_spin.setValue(self.device_port)
         net_row.addWidget(self.port_spin)
         left_layout.addLayout(net_row)
+
+        hb_grp = QtWidgets.QGroupBox("Board (heartbeats)")
+        hb_layout = QtWidgets.QVBoxLayout(hb_grp)
+        self.connection_label = QtWidgets.QLabel("Connection: —")
+        self.connection_label.setStyleSheet("font-weight: bold;")
+        hb_layout.addWidget(self.connection_label)
+        self.heartbeat_rate_label = QtWidgets.QLabel("Heartbeat rate: — Hz")
+        self.heartbeat_rate_label.setStyleSheet("font-weight: bold;")
+        hb_layout.addWidget(self.heartbeat_rate_label)
+        self.board_state_label = QtWidgets.QLabel("Board state: —")
+        hb_layout.addWidget(self.board_state_label)
+        self.board_id_label = QtWidgets.QLabel("Board ID: —")
+        hb_layout.addWidget(self.board_id_label)
+        self.board_ip_label = QtWidgets.QLabel("Source: —")
+        hb_layout.addWidget(self.board_ip_label)
+        self.firmware_hash_label = QtWidgets.QLabel("Firmware hash: —")
+        hb_layout.addWidget(self.firmware_hash_label)
+
+        self.send_heartbeat_cb = QtWidgets.QCheckBox("Send server heartbeat")
+        self.send_heartbeat_cb.stateChanged.connect(self._on_send_heartbeat_changed)
+        hb_layout.addWidget(self.send_heartbeat_cb)
+
+        self.send_actuator_config_btn = QtWidgets.QPushButton("Send actuator config (minimal)")
+        self.send_actuator_config_btn.setToolTip(
+            "Sends DAQv2-Comms ACTUATOR_CONFIG: not abort controller, serial printing on, no abort tables."
+        )
+        self.send_actuator_config_btn.clicked.connect(self._send_minimal_actuator_config)
+        hb_layout.addWidget(self.send_actuator_config_btn)
+
+        left_layout.addWidget(hb_grp)
 
         # Graph channel toggles (similar to sense_testing_gui)
         chan_row = QtWidgets.QHBoxLayout()
@@ -369,6 +529,59 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
 
     # ----- Networking helpers -----
 
+    def _on_board_heartbeat(
+        self,
+        timestamp: float,
+        board_id: int,
+        board_state: int,
+        engine_state: int,
+        source_ip: str,
+        firmware_hash: bytes,
+    ):
+        self.heartbeat_timestamps.append(timestamp)
+        self.last_heartbeat_time = timestamp
+        self.board_id = board_id
+        self.board_state = board_state
+        self.board_source_ip = source_ip
+        self.firmware_hash = firmware_hash
+        full_hex = firmware_hash.hex()
+        short_hex = full_hex[:16] + "..."
+        self.firmware_hash_label.setText(f"Firmware hash: {short_hex}")
+        self.firmware_hash_label.setToolTip(f"SHA-256: {full_hex}")
+        self.ip_edit.setText(source_ip)
+
+    def _on_send_heartbeat_changed(self, state: int):
+        if state == QtCore.Qt.CheckState.Checked.value:
+            self._server_heartbeat_timer.start(SERVER_HEARTBEAT_INTERVAL_MS)
+        else:
+            self._server_heartbeat_timer.stop()
+
+    def _send_server_heartbeat_once(self):
+        ip = self.ip_edit.text().strip()
+        if not ip:
+            self.status_label.setText("Send status: No target IP")
+            return
+        try:
+            port = int(self.port_spin.value())
+            pkt = build_server_heartbeat_packet()
+            self._send_sock.sendto(pkt, (ip, port))
+            self.status_label.setText(f"Send status: Server HB to {ip}:{port}")
+        except Exception as e:
+            self.status_label.setText(f"Send status: Error — {e}")
+
+    def _send_minimal_actuator_config(self):
+        ip = self.ip_edit.text().strip()
+        if not ip:
+            self.status_label.setText("Send status: No target IP")
+            return
+        try:
+            port = int(self.port_spin.value())
+            pkt = build_minimal_actuator_config_packet()
+            self._send_sock.sendto(pkt, (ip, port))
+            self.status_label.setText(f"Send status: Actuator config to {ip}:{port}")
+        except Exception as e:
+            self.status_label.setText(f"Send status: Error — {e}")
+
     def on_actuator_toggled(self, actuator_id: int, checked: bool):
         state = 1 if checked else 0
         pkt = create_actuator_command_packet([(actuator_id, state)])
@@ -377,7 +590,7 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
         ip = self.ip_edit.text().strip() or self.device_ip
         port = int(self.port_spin.value())
         try:
-            self.command_sock.sendto(pkt, (ip, port))
+            self._send_sock.sendto(pkt, (ip, port))
             self.status_label.setText(f"Sent command: actuator {actuator_id} -> {state}")
         except OSError as e:
             self.status_label.setText(f"Send error: {e}")
@@ -398,7 +611,6 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
             sid = int(dp.get("sensor_id", -1))
             data_u32 = int(dp.get("data", 0))
 
-            # Actuator_Testing now sends 1-indexed IDs; still accept legacy 0-indexed.
             if 1 <= sid <= NUM_ACTUATORS:
                 actuator_id = sid
             elif 0 <= sid < NUM_ACTUATORS:
@@ -406,7 +618,6 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
             else:
                 continue
 
-            # Voltage is stored as float bits in data_u32
             try:
                 voltage = struct.unpack("<f", struct.pack("<I", data_u32 & 0xFFFFFFFF))[0]
             except struct.error:
@@ -415,9 +626,7 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
             hist = self.voltage_history[actuator_id]
             hist.append((t_rel, float(voltage)))
 
-            # Update numeric readout according to mode
             if self.show_current:
-                # V_adc -> V_shunt -> I = V_shunt / 0.05
                 v_shunt = voltage / 20.0
                 current = v_shunt / 0.05
                 self.voltage_labels[actuator_id].setText(f"{current:.3f} A")
@@ -425,7 +634,6 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
                 self.voltage_labels[actuator_id].setText(f"{voltage:.3f} V")
 
     def on_channel_toggled(self, actuator_id: int, state: int):
-        from PyQt6.QtCore import Qt
         enabled = state == QtCore.Qt.CheckState.Checked.value
         self.plot_enabled[actuator_id] = enabled
         curve = self.curves.get(actuator_id)
@@ -433,18 +641,44 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
             curve.setVisible(enabled)
 
     def on_show_current_toggled(self, state: int):
-        from PyQt6.QtCore import Qt
         self.show_current = state == QtCore.Qt.CheckState.Checked.value
-        # Update axis label
         axis_style = {"color": "#FFFFFF", "font-size": "11pt"}
         if self.show_current:
             self.plot_widget.setLabel("left", "Current (A)", **axis_style)
         else:
             self.plot_widget.setLabel("left", "Current sense (V)", **axis_style)
-        # Force labels to refresh on next packet; plot refresh will convert accordingly
         self.update_plots()
 
+    def _update_board_status_labels(self):
+        now = time.time()
+        if len(self.heartbeat_timestamps) >= 2:
+            span = self.heartbeat_timestamps[-1] - self.heartbeat_timestamps[0]
+            rate = (len(self.heartbeat_timestamps) - 1) / span if span > 0 else 0
+            self.heartbeat_rate_label.setText(f"Heartbeat rate: {rate:.2f} Hz")
+        else:
+            self.heartbeat_rate_label.setText("Heartbeat rate: — Hz")
+
+        if self.board_state is not None:
+            self.board_state_label.setText(f"Board state: {board_state_name(self.board_state)}")
+        else:
+            self.board_state_label.setText("Board state: —")
+
+        self.board_id_label.setText(f"Board ID: {self.board_id if self.board_id is not None else '—'}")
+        self.board_ip_label.setText(f"Source: {self.board_source_ip or '—'}")
+
+        if self.last_heartbeat_time is not None:
+            if now - self.last_heartbeat_time > HEARTBEAT_TIMEOUT_SEC:
+                self.connection_label.setText("Connection: Lost")
+                self.connection_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+            else:
+                self.connection_label.setText("Connection: Connected")
+                self.connection_label.setStyleSheet("font-weight: bold; color: #2ecc71;")
+        else:
+            self.connection_label.setText("Connection: —")
+            self.connection_label.setStyleSheet("font-weight: bold;")
+
     def update_plots(self):
+        self._update_board_status_labels()
         for actuator_id, curve in self.curves.items():
             if not self.plot_enabled.get(actuator_id, True):
                 continue
@@ -452,7 +686,6 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
             if not hist:
                 continue
             xs, ys = zip(*hist)
-            # Limit time window
             t_max = xs[-1]
             t_min = max(0.0, t_max - self.window_seconds)
             xs_plot = []
@@ -469,6 +702,18 @@ class ActuatorTestingWindow(QtWidgets.QMainWindow):
                 ys_plot.append(value)
             curve.setData(xs_plot, ys_plot)
 
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        self._server_heartbeat_timer.stop()
+        if self.receiver:
+            self.receiver.stop()
+            self.receiver.wait(2000)
+        try:
+            self._send_sock.close()
+        except Exception:
+            pass
+        self.update_timer.stop()
+        event.accept()
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
@@ -479,4 +724,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

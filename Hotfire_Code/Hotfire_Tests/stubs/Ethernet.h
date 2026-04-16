@@ -19,6 +19,5 @@ class EthernetServer {
 public:
     EthernetServer(uint16_t) {}
     virtual void begin() {}
-    virtual void begin(uint16_t) {} // virtual so OTAEthernetServer can override
     EthernetClient available() { return EthernetClient(); }
 };

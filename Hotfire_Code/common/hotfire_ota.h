@@ -25,16 +25,10 @@
 #define HOTFIRE_OTA_TIMEOUT_MS  10000
 #endif
 
-// EthernetServer is abstract on ESP32 Arduino — it declares
-//   virtual void begin(uint16_t port=0) = 0;
-// but EthernetServer only implements the no-arg begin(). This subclass
-// adds the required override so we can instantiate the server object.
-class OTAEthernetServer : public EthernetServer {
-public:
-  OTAEthernetServer(uint16_t port) : EthernetServer(port) {}
-  void begin(uint16_t) override { EthernetServer::begin(); }
-  using EthernetServer::begin;
-};
+// Ethernet 2.x: EthernetServer is concrete; the listen port is set in the
+// constructor and begin() takes no arguments. Keep a name used across hotfire
+// firmware without a bogus override (older ESP32/Ethernet forks differed).
+using OTAEthernetServer = EthernetServer;
 
 // Blocking OTA handler. Call only after otaServer.available() returns a client.
 // On success: sends "OK", closes the client, and reboots.

@@ -1,21 +1,9 @@
 #include "main.h"
 
-// ── Workaround: EthernetServer is abstract on ESP32 ──────────
-// ESP32 Arduino core's Server base class declares:
-//   virtual void begin(uint16_t port=0) = 0;
-// but the Ethernet library's EthernetServer only implements begin().
-// This wrapper adds the missing override so we can instantiate it.
-class OTAEthernetServer : public EthernetServer {
-public:
-  OTAEthernetServer(uint16_t port) : EthernetServer(port) {}
-  void begin(uint16_t port) override { EthernetServer::begin(); }
-  using EthernetServer::begin;  // Keep the no-arg version visible too
-};
-
 // ── Globals ───────────────────────────────────────────────────
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x05 };
 
-OTAEthernetServer otaServer(OTA_TCP_PORT);
+EthernetServer otaServer(OTA_TCP_PORT);
 unsigned long lastPrintMillis = 0;
 unsigned long bootTime        = 0;
 

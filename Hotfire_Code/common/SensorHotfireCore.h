@@ -35,10 +35,15 @@
 #endif
 
 // Serial output gated by this flag (define in one .cpp per project, e.g. main.cpp).
+// Default is true until SENSOR_CONFIG is received; the packet's enable_serial_printing
+// field then updates g_sensor_hotfire_serial for loop() / runtime SENSOR_HOTFIRE_PRINT*.
+// setup() uses SENSOR_HOTFIRE_BOOT_* so boot diagnostics always appear on Serial.
 extern bool g_sensor_hotfire_serial;
 #define SENSOR_HOTFIRE_PRINT(x)    do { if (g_sensor_hotfire_serial) Serial.print(x); } while(0)
 #define SENSOR_HOTFIRE_PRINTLN(x)  do { if (g_sensor_hotfire_serial) Serial.println(x); } while(0)
 #define SENSOR_HOTFIRE_PRINTLN_()  do { if (g_sensor_hotfire_serial) Serial.println(); } while(0)
+#define SENSOR_HOTFIRE_BOOT_PRINT(x)    do { Serial.print(x); } while(0)
+#define SENSOR_HOTFIRE_BOOT_PRINTLN(x)  do { Serial.println(x); } while(0)
 
 namespace SensorHotfire {
 
@@ -321,16 +326,17 @@ inline void updateStateLed(CoreState& s, const Config& cfg, int state_num) {
 
 inline void setup(CoreState& s, const Config& cfg) {
   Serial.begin(115200);
+  delay(SERIAL_MONITOR_READY_DELAY_MS);
   FirmwareHash::print();
-  SENSOR_HOTFIRE_PRINT(cfg.board_name);
-  SENSOR_HOTFIRE_PRINTLN(" Hotfire state machine starting...");
+  SENSOR_HOTFIRE_BOOT_PRINT(cfg.board_name);
+  SENSOR_HOTFIRE_BOOT_PRINTLN(" Hotfire state machine starting...");
 
   s.board_id = (uint8_t)BOARD_ID;
   s.staticIP = IPAddress(192, 168, 2, (uint8_t)BOARD_ID);
-  SENSOR_HOTFIRE_PRINT("Board ID and IP: ");
-  SENSOR_HOTFIRE_PRINT(static_cast<unsigned>(s.board_id));
-  SENSOR_HOTFIRE_PRINT(" / 192.168.2.");
-  SENSOR_HOTFIRE_PRINTLN(static_cast<unsigned>(s.board_id));
+  SENSOR_HOTFIRE_BOOT_PRINT("Board ID and IP: ");
+  SENSOR_HOTFIRE_BOOT_PRINT(static_cast<unsigned>(s.board_id));
+  SENSOR_HOTFIRE_BOOT_PRINT(" / 192.168.2.");
+  SENSOR_HOTFIRE_BOOT_PRINTLN(static_cast<unsigned>(s.board_id));
 
   const sense_board_pins::Layout& Pins = *cfg.pins;
   pinMode(Pins.LED, OUTPUT);
@@ -346,6 +352,44 @@ inline void setup(CoreState& s, const Config& cfg) {
   delay(ETHERNET_INIT_DELAY_MS);
   Ethernet.begin(s.mac, s.staticIP, s.dns, s.gateway, s.subnet);
   delay(ETHERNET_BEGIN_DELAY_MS);
+
+  // W5500 / Ethernet status (same pattern as Stream_ADC_Data and other DAQ sketches)
+  SENSOR_HOTFIRE_BOOT_PRINTLN("[ETH] Ethernet initialized (SPI WIZnet)");
+  SENSOR_HOTFIRE_BOOT_PRINT("Configured static IP: ");
+  SENSOR_HOTFIRE_BOOT_PRINTLN(s.staticIP);
+  SENSOR_HOTFIRE_BOOT_PRINT("Stack IP (Ethernet.localIP): ");
+  SENSOR_HOTFIRE_BOOT_PRINTLN(Ethernet.localIP());
+  SENSOR_HOTFIRE_BOOT_PRINT("Hardware: ");
+  switch (Ethernet.hardwareStatus()) {
+    case EthernetNoHardware:
+      SENSOR_HOTFIRE_BOOT_PRINTLN("no chip detected — check CS / SPI wiring");
+      break;
+    case EthernetW5100:
+      SENSOR_HOTFIRE_BOOT_PRINTLN("W5100");
+      break;
+    case EthernetW5200:
+      SENSOR_HOTFIRE_BOOT_PRINTLN("W5200");
+      break;
+    case EthernetW5500:
+      SENSOR_HOTFIRE_BOOT_PRINTLN("W5500");
+      break;
+    default:
+      SENSOR_HOTFIRE_BOOT_PRINTLN("unknown");
+      break;
+  }
+  SENSOR_HOTFIRE_BOOT_PRINT("Link status: ");
+  if (Ethernet.linkStatus() == LinkON) {
+    SENSOR_HOTFIRE_BOOT_PRINTLN("Connected");
+  } else if (Ethernet.linkStatus() == LinkOFF) {
+    SENSOR_HOTFIRE_BOOT_PRINTLN("Disconnected");
+  } else {
+    SENSOR_HOTFIRE_BOOT_PRINTLN("Unknown");
+  }
+  if (Ethernet.localIP() == IPAddress(0, 0, 0, 0)) {
+    SENSOR_HOTFIRE_BOOT_PRINTLN("[ETH] WARNING: stack IP is 0.0.0.0 — check cable / W5500");
+  }
+  Serial.flush();
+
   s.udp.begin(SENSOR_UDP_LISTEN_PORT);
   Serial.print("UDP listening on port ");
   Serial.println(SENSOR_UDP_LISTEN_PORT);
@@ -365,9 +409,7 @@ inline void setup(CoreState& s, const Config& cfg) {
   Serial.print(static_cast<unsigned>(s.board_id));
   Serial.println(":5005");
   Serial.flush();
-  SENSOR_HOTFIRE_PRINT("Ethernet IP: ");
-  SENSOR_HOTFIRE_PRINTLN(Ethernet.localIP());
-  SENSOR_HOTFIRE_PRINTLN("Setup complete. State: WaitingForServer");
+  SENSOR_HOTFIRE_BOOT_PRINTLN("Setup complete. State: WaitingForServer");
 }
 
 inline void loop(CoreState& s, const Config& cfg) {
