@@ -4,15 +4,18 @@
 
 #include <STAR_ISM330DH.h>
 
-// I2C (match other IC_Testing boards; change if your wiring differs)
-#define ISM330_SDA_PIN 0
-#define ISM330_SCL_PIN 1
+// SPI bus pins (per board schematic)
+#define ISM330_SCLK_PIN 2
+#define ISM330_MOSI_PIN 3
+#define ISM330_MISO_PIN 16
+#define ISM330_CS_PIN   20
 
-// 7-bit: 0x6A SA0 low, 0x6B SA0 high (ISM330DH::begin defaults to HIGH)
-#define ISM330_I2C_ADDR 0x6B
+// IMU interrupt pins
+#define ISM330_INT1_PIN 21
+#define ISM330_INT2_PIN 22
 
-// GPIO connected to ISM330 INT1 (active high after setPinMode(false))
-#define ISM330_INT1_PIN 5
+// SPI clock for the IMU (datasheet allows up to 10 MHz)
+#define ISM330_SPI_HZ 3000000
 
 // Accelerometer full scale — keep ISM330_ACCEL_FS_G in sync for wake-up math
 #define ISM330_ACCEL_FS ISM_16g
