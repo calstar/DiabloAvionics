@@ -7,3 +7,4 @@ __pycache__/
 .cpp.o
 .pio/
 .claude
+docs/

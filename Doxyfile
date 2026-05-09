@@ -1,0 +1,60 @@
+PROJECT_NAME           = "DiabloAvionics"
+PROJECT_BRIEF          = "CalSTAR avionics firmware, libraries, and ground software"
+OUTPUT_DIRECTORY       = docs
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = English
+
+INPUT                  = . \
+                         common \
+                         libraries \
+                         "DAN-E Avionics" \
+                         "Stacklight Driver" \
+                         "Environmental Tracker" \
+                         "State Machine" \
+                         Avionics_State_Machine_Drafts \
+                         Hotfire_Code \
+                         Actuator_Board \
+                         PT_Board \
+                         LC_Board \
+                         RTD_Board \
+                         Encoder_Board \
+                         Multi_Board_Comms_Testing \
+                         Multi_Board_Comms_Testing_Secondary \
+                         Burn_ID \
+                         Motor \
+                         DAQv1_FA25 \
+                         "Ethernet Testing" \
+                         "Ethernet OTA Testing" \
+                         IC_Testing \
+                         ADC_Testing \
+                         test_guis
+
+RECURSIVE              = YES
+FILE_PATTERNS          = *.c *.cc *.cpp *.cxx *.h *.hh *.hpp *.ino *.py *.md
+EXTENSION_MAPPING      = ino=C++
+EXCLUDE                = Archive __pycache__ .pio .venv .git .claude
+EXCLUDE_PATTERNS       = */build/* */.pio/* */__pycache__/*
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+OPTIMIZE_OUTPUT_FOR_C  = NO
+MARKDOWN_SUPPORT       = YES
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+
+HAVE_DOT               = NO
